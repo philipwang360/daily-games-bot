@@ -296,7 +296,7 @@ GAME_LINKS = {
 }
 
 # Games to exclude from crown calculations (still tracked, just not crowned)
-NO_CROWN_GAMES = {"doctordle", "loldle", "narutodle", "pokedle"}
+NO_CROWN_GAMES = {"doctordle", "loldle", "narutodle", "pokedle", "whentaken"}
 
 
 # ═══════════════════════════════════════════════════════════════════
