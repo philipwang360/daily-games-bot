@@ -573,10 +573,51 @@ async def on_message_edit(_before, after: discord.Message):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  HISTORY SYNC HELPERS
+# ═══════════════════════════════════════════════════════════════════
+
+async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
+    """Fetch message history and populate the store"""
+    after = datetime.now(timezone.utc) - timedelta(days=days)
+    message_count = 0
+    result_count = 0
+    
+    try:
+        async for msg in channel.history(limit=1000, after=after, oldest_first=False):
+            if msg.author.bot:
+                continue
+            
+            results = parse_message(msg.content)
+            if results:
+                date_str = msg.created_at.strftime("%Y-%m-%d")
+                gid = str(channel.guild.id)
+                uid = str(msg.author.id)
+                name = msg.author.display_name
+                
+                for r in results:
+                    store.save(gid, uid, name, r, date_str)
+                    result_count += 1
+            message_count += 1
+    except discord.HTTPException as e:
+        log.error("Error fetching history: %s", e)
+    
+    log.info(f"Synced {message_count} messages, found {result_count} game results from last {days} days")
+    return result_count
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  COMMANDS
 # ═══════════════════════════════════════════════════════════════════
 
 PERIODS = {"today", "yesterday", "yday", "week", "month", "all"}
+
+
+@bot.command(name="sync")
+async def cmd_sync(ctx, days: int = 30):
+    """Manually sync message history to populate the store"""
+    await ctx.send(f"🔄 Syncing last {days} days of message history...")
+    count = await sync_history_to_store(ctx.channel, days)
+    await ctx.send(f"✅ Found {count} game results!")
 
 
 @bot.command(name="lb", aliases=["leaderboard"])
@@ -625,8 +666,15 @@ async def cmd_lb(ctx, *, args: str = "today"):
         meta = _GAME_META.get(game_name.lower(), {})
         title += f"  ·  {meta.get('icon','🎮')} {game_name}"
 
-    # Fetch from in-memory store
+    # First try in-memory store
     rows = store.fetch(gid, **kw)
+    
+    # If no results, sync from message history
+    if not rows and isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("🔄 Fetching message history...", delete_after=3)
+        days_to_sync = 1 if single_day else (7 if period == "week" else 30)
+        await sync_history_to_store(ctx.channel, days=days_to_sync)
+        rows = store.fetch(gid, **kw)
 
     if single_day:
         embed = _build_daily_embed(title, rows)
@@ -662,6 +710,13 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     
     # Fetch from in-memory store
     rows = store.fetch(gid, uid=uid)
+    
+    # If no results, sync from history first
+    if not rows and isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("🔄 Fetching your history...", delete_after=3)
+        await sync_history_to_store(ctx.channel, days=30)
+        rows = store.fetch(gid, uid=uid)
+    
     if not rows:
         return await ctx.send(
             f"No results for **{target.display_name}** yet.")
@@ -746,6 +801,14 @@ async def cmd_crowns(ctx, *, args: str = "all"):
 
     # Fetch from in-memory store
     rows = store.fetch(gid, **kw)
+    
+    # If no results, sync from history first
+    if not rows and isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("🔄 Fetching leaderboard history...", delete_after=3)
+        days_to_sync = 1 if period == "today" else (7 if period == "week" else 30)
+        await sync_history_to_store(ctx.channel, days=days_to_sync)
+        rows = store.fetch(gid, **kw)
+    
     crowns_map, _ = _compute_crowns(rows)
 
     names: dict[str, str] = {}
