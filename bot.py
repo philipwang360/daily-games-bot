@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Daily Games Leaderboard Bot for Discord — Per-Game Edition
+Zaily Games Leaderboard Bot for Discord — Per-Game Edition
 """
 
 import re, os, sqlite3, logging
@@ -23,10 +23,10 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════
 
 TOKEN      = os.getenv("DAILY_GAMES_BOT_TOKEN")
-DB_PATH    = os.getenv("DB_PATH", "dailygames.db")
-PREFIX     = os.getenv("BOT_PREFIX", "!")
+DB_PATH    = os.getenv("DB_PATH", "zailygames.db")
+PREFIX     = os.getenv("BOT_PREFIX", "!zgb")
 
-log = logging.getLogger("dailygames")
+log = logging.getLogger("zailygames")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
 
 MEDALS = ["🥇", "🥈", "🥉"]
@@ -692,7 +692,7 @@ async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
 @bot.command(name="help")
 async def cmd_help(ctx):
     e = discord.Embed(
-        title="🎲  Daily Games Leaderboard",
+        title="🎲  Zaily Games Leaderboard",
         color=0x5865F2,
         description=(
             "I track daily puzzle games automatically!\n"
