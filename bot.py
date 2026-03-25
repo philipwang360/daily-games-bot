@@ -248,6 +248,57 @@ def _timeguessr(m):
     return s, mx, f"{s:,}/{mx:,}"
 
 
+@game_parser("Framed", r"Framed\s*#(\d+)\s*\n([🎥🟥🟩⬛\s]+)",
+             lower_is_better=True, icon="🎬")
+def _framed(m):
+    line = m.group(2).strip()
+    # Count squares - green is good (low score), red/black are misses
+    green = line.count("🟩")
+    red = line.count("🟥")
+    black = line.count("⬛")
+    # Score = number of attempts to get green (1-6), or 7 if failed
+    if green == 0:
+        score = 7
+    else:
+        # Find position of first green
+        squares = [c for c in line if c in ["🟥", "🟩", "⬛"]]
+        try:
+            score = squares.index("🟩") + 1
+        except ValueError:
+            score = 7
+    return score, 6, f"{score}/6"
+
+
+@game_parser("Costcodle", r"Costcodle\s*#\d+\s+(\d)/6",
+             lower_is_better=True, icon="🛒")
+def _costcodle(m):
+    s = int(m.group(1))
+    return s, 6, f"{s}/6"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  GAME LINKS
+# ═══════════════════════════════════════════════════════════════════
+
+GAME_LINKS = {
+    "Wordle": "https://www.nytimes.com/games/wordle/index.html",
+    "Pokédle": "https://pokedle.net/",
+    "LoLdle": "https://loldle.net/",
+    "Narutodle": "https://narutodle.com/",
+    "WhenTaken": "https://whentaken.com/",
+    "Dialed": "https://dialed.wtf/",
+    "Catfishing": "https://catfishing.net/",
+    "Feudle": "https://feudle.com/",
+    "Doctordle": "https://doctordle.com/",
+    "TimeGuessr": "https://timeguessr.com/",
+    "Framed": "https://framed.wtf/",
+    "Costcodle": "https://costcodle.com/"
+}
+
+# Games to exclude from crown calculations (still tracked, just not crowned)
+NO_CROWN_GAMES = {"doctordle", "loldle", "narutodle", "pokedle"}
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  MESSAGE HISTORY FETCHING
 # ═══════════════════════════════════════════════════════════════════
@@ -322,6 +373,9 @@ def deduplicate_results(results: list[dict]) -> list[dict]:
 def _compute_crowns(rows):
     by_gd: dict[tuple, list] = defaultdict(list)
     for r in rows:
+        # Skip games that shouldn't count toward crowns
+        if r["game"].lower() in NO_CROWN_GAMES:
+            continue
         by_gd[(r["game"], r["puzzle_date"])].append(r)
 
     user_crowns:   dict[tuple, int]       = defaultdict(int)
@@ -394,7 +448,14 @@ def _build_daily_embed(title, rows):
             crown = " 👑" if r["score"] == best_score and len(gr) > 1 else ""
             lines.append(f"{medal} **{r['username']}** — {r['display']}{crown}")
 
-        embed.add_field(name=f"{icon}  {game_name}",
+        # Add game name with icon as field name
+        field_name = f"{icon}  {game_name}"
+        if low:
+            field_name += " (lower is better)"
+        else:
+            field_name += " (higher is better)"
+            
+        embed.add_field(name=field_name,
                         value="\n".join(lines), inline=False)
     return embed
 
@@ -454,7 +515,14 @@ def _build_period_embed(title, rows, *, show_detail=False):
                         f"{lbl}: {r['display']}{' 👑' if won else ''}")
                 lines.append(f"╰ {' · '.join(day_parts)}")
 
-        embed.add_field(name=f"{icon}  {game_name}",
+        # Add game name with icon and scoring info
+        field_name = f"{icon}  {game_name}"
+        if low:
+            field_name += " (lower is better)"
+        else:
+            field_name += " (higher is better)"
+            
+        embed.add_field(name=field_name,
                         value="\n".join(lines) or "—", inline=False)
     return embed
 
@@ -517,6 +585,8 @@ async def on_ready():
         daily_summary.start()
     if not monthly_reset_check.is_running():
         monthly_reset_check.start()
+    if not daily_links.is_running():
+        daily_links.start()
     
     cmds = [c.name for c in bot.commands]
     log.info("✅  %s online  ·  tracking %d games  ·  prefix: '%s'  ·  commands: %s", 
@@ -618,6 +688,25 @@ async def cmd_sync(ctx, days: int = 30):
     await ctx.send(f"🔄 Syncing last {days} days of message history...")
     count = await sync_history_to_store(ctx.channel, days)
     await ctx.send(f"✅ Found {count} game results!")
+
+
+@bot.command(name="links")
+async def cmd_links(ctx):
+    """Show all game links"""
+    lines = []
+    for game_name, url in sorted(GAME_LINKS.items()):
+        meta = _GAME_META.get(game_name.lower(), {})
+        icon = meta.get('icon', '🎮')
+        lines.append(f"{icon} [{game_name}]({url})")
+    
+    embed = discord.Embed(
+        title="🎮  Daily Games Links",
+        description="\n".join(lines),
+        color=0x5865F2,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text=f"Posted at 8:00 AM ET · {RESET_DAY}th of each month for new leaderboard")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="lb", aliases=["leaderboard"])
@@ -753,8 +842,12 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
 
         avg_s   = _fmt_avg(avg, mx)
         crown_s = f" · 👑 {c}" if c else ""
+        
+        # Add scoring direction hint
+        direction = "lower=better" if low else "higher=better"
+        
         e.add_field(
-            name=f"{icon}  {gn}",
+            name=f"{icon}  {gn}  ({direction})",
             value=(f"Avg **{avg_s}** · Best **{best_d}** · "
                    f"{len(gr)} plays{crown_s}"),
             inline=False)
@@ -840,10 +933,13 @@ async def cmd_crowns(ctx, *, args: str = "all"):
 
     lines = []
     for _rank, medal, (uid, data) in ranked[:15]:
-        breakdown = " · ".join(
-            f"{_GAME_META.get(g.lower(),{}).get('icon','🎮')}{c}"
-            for g, c in sorted(data["by_game"].items(),
-                               key=lambda x: x[1], reverse=True))
+        # Build breakdown with game names
+        game_parts = []
+        for g, c in sorted(data["by_game"].items(), key=lambda x: x[1], reverse=True):
+            meta = _GAME_META.get(g.lower(), {})
+            icon = meta.get('icon', '🎮')
+            game_parts.append(f"{icon} {g}: {c}")
+        breakdown = " · ".join(game_parts)
         lines.append(
             f"{medal} **{data['name']}** — **{data['total']}** crowns\n"
             f"╰ {breakdown}")
@@ -943,6 +1039,40 @@ async def monthly_reset_check():
                         await ch.send("🗑️ **Monthly Reset**: Leaderboard data has been cleared for the new month!")
                     except:
                         pass
+
+
+@tasks.loop(time=dt_time(hour=8, minute=0, tzinfo=ZoneInfo("America/New_York")))
+async def daily_links():
+    """Post daily game links at 8AM ET"""
+    for guild in bot.guilds:
+        gid = str(guild.id)
+        channel_id = config_store.get(gid)
+        
+        if not channel_id:
+            continue
+            
+        ch = bot.get_channel(channel_id)
+        if not ch:
+            continue
+        
+        # Build links embed
+        lines = []
+        for game_name, url in sorted(GAME_LINKS.items()):
+            meta = _GAME_META.get(game_name.lower(), {})
+            icon = meta.get('icon', '🎮')
+            lines.append(f"{icon} [{game_name}]({url})")
+        
+        embed = discord.Embed(
+            title="🎮  Daily Games Links",
+            description="\n".join(lines),
+            color=0x57F287,
+            timestamp=datetime.now(timezone.utc)
+        )
+        today = datetime.now(ZoneInfo("America/New_York"))
+        embed.set_footer(text=f"{today.strftime('%A, %B %d')} · Good luck!")
+        
+        await ch.send(embed=embed)
+        log.info("Links sent → %s", guild.name)
 
 
 # ═══════════════════════════════════════════════════════════════════
