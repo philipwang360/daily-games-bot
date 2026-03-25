@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Zaily Games Leaderboard Bot for Discord — Per-Game Edition
+Zaily Games Leaderboard Bot for Discord — Message History Edition
+Monthly reset to prevent backlog accumulation
 """
 
-import re, os, logging, sqlite3
+import re, os, logging, asyncio
 from datetime import datetime, timedelta, timezone, time as dt_time
 from collections import defaultdict
 from typing import Optional
@@ -11,14 +12,6 @@ from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands, tasks
-
-# Database support (SQLite locally, PostgreSQL on Railway)
-try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-    POSTGRES_AVAILABLE = True
-except ImportError:
-    POSTGRES_AVAILABLE = False
 
 try:
     from dotenv import load_dotenv
@@ -31,16 +24,89 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════
 
 TOKEN      = os.getenv("DAILY_GAMES_BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway provides this automatically
-# Check if we're actually using PostgreSQL (both available AND URL provided)
-USE_POSTGRES = POSTGRES_AVAILABLE and DATABASE_URL and DATABASE_URL.startswith("postgresql")
 PREFIX     = os.getenv("BOT_PREFIX", "!zgb ")
-DB_PATH    = os.getenv("DB_PATH", "zailygames.db")  # SQLite database path
+RESET_DAY  = int(os.getenv("RESET_DAY", "1"))  # Day of month to reset (default: 1st)
 
 log = logging.getLogger("zailygames")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
 
 MEDALS = ["🥇", "🥈", "🥉"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  IN-MEMORY STORAGE (Monthly reset)
+# ═══════════════════════════════════════════════════════════════════
+
+class ResultsStore:
+    """In-memory storage with monthly reset"""
+    
+    def __init__(self):
+        # Structure: {(guild_id, user_id, game, date): GameResult}
+        self.results: dict[tuple, dict] = {}
+        self.current_month: int = datetime.now(timezone.utc).month
+    
+    def check_reset(self):
+        """Reset storage if we've entered a new month"""
+        now = datetime.now(timezone.utc)
+        if now.month != self.current_month and now.day >= RESET_DAY:
+            old_month = self.current_month
+            self.results.clear()
+            self.current_month = now.month
+            log.info("🗑️  Monthly reset triggered: cleared %d results from month %d", 
+                     len(self.results), old_month)
+            return True
+        return False
+    
+    def save(self, guild_id: str, user_id: str, username: str, 
+             game_result, date_str: str):
+        """Save a result, overwriting any existing entry for same user/game/date"""
+        key = (guild_id, user_id, game_result.game, date_str)
+        self.results[key] = {
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "username": username,
+            "game": game_result.game,
+            "score": game_result.score,
+            "max_score": game_result.max_score,
+            "display": game_result.display,
+            "puzzle_date": date_str,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+    
+    def fetch(self, guild_id: str, *, date=None, start=None, end=None, 
+              game=None, uid=None):
+        """Fetch results matching criteria"""
+        rows = []
+        for key, r in self.results.items():
+            if r["guild_id"] != guild_id:
+                continue
+            if date and r["puzzle_date"] != date:
+                continue
+            if start and r["puzzle_date"] < start:
+                continue
+            if end and r["puzzle_date"] > end:
+                continue
+            if game and r["game"].lower() != game.lower():
+                continue
+            if uid and r["user_id"] != uid:
+                continue
+            rows.append(r)
+        # Sort by date desc, game, score
+        meta_low = {p["name"].lower(): p["low"] for p in _PARSERS}
+        rows.sort(key=lambda r: (
+            r["puzzle_date"], 
+            r["game"], 
+            r["score"] if meta_low.get(r["game"].lower(), False) else -r["score"]
+        ), reverse=True)
+        return rows
+    
+    def get_all(self, guild_id: str):
+        """Get all results for a guild"""
+        return [r for r in self.results.values() if r["guild_id"] == guild_id]
+
+
+# Global storage instance
+store = ResultsStore()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -183,71 +249,70 @@ def _timeguessr(m):
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  DATABASE
+#  MESSAGE HISTORY FETCHING
 # ═══════════════════════════════════════════════════════════════════
 
-def _db():
-    """Get database connection (PostgreSQL on Railway, SQLite locally)"""
-    if USE_POSTGRES:
-        return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-    else:
-        return sqlite3.connect(DB_PATH)
+async def fetch_message_history(channel: discord.TextChannel, 
+                                after: Optional[datetime] = None,
+                                limit: int = 1000) -> list[discord.Message]:
+    """Fetch messages from channel history"""
+    messages = []
+    try:
+        # Discord.py handles pagination automatically
+        async for msg in channel.history(limit=limit, after=after, oldest_first=False):
+            messages.append(msg)
+    except discord.HTTPException as e:
+        log.error("Error fetching history: %s", e)
+    return messages
 
 
-def init_db():
-    with _db() as db:
-        db.executescript("""
-            CREATE TABLE IF NOT EXISTS results (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id    TEXT NOT NULL,
-                user_id     TEXT NOT NULL,
-                username    TEXT NOT NULL,
-                game        TEXT NOT NULL,
-                score       REAL NOT NULL,
-                max_score   REAL NOT NULL,
-                display     TEXT NOT NULL,
-                puzzle_date TEXT NOT NULL,
-                created_at  TEXT DEFAULT (datetime('now')),
-                UNIQUE(guild_id, user_id, game, puzzle_date)
-            );
-            CREATE TABLE IF NOT EXISTS config (
-                guild_id           TEXT PRIMARY KEY,
-                summary_channel_id TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_results_gd
-                ON results(guild_id, puzzle_date);
-            CREATE INDEX IF NOT EXISTS idx_results_game
-                ON results(guild_id, game);
-        """)
-    log.info("DB ready  (%s)", DB_PATH)
+async def build_results_from_history(channel: discord.TextChannel,
+                                      days: int = 30) -> list[dict]:
+    """Build results list by fetching and parsing message history"""
+    after = datetime.now(timezone.utc) - timedelta(days=days)
+    messages = await fetch_message_history(channel, after=after)
+    
+    results = []
+    for msg in messages:
+        if msg.author.bot:
+            continue
+        
+        game_results = parse_message(msg.content)
+        if game_results:
+            date_str = msg.created_at.strftime("%Y-%m-%d")
+            for gr in game_results:
+                results.append({
+                    "guild_id": str(channel.guild.id),
+                    "user_id": str(msg.author.id),
+                    "username": msg.author.display_name,
+                    "game": gr.game,
+                    "score": gr.score,
+                    "max_score": gr.max_score,
+                    "display": gr.display,
+                    "puzzle_date": date_str,
+                    "created_at": msg.created_at.isoformat(),
+                    "message_id": msg.id
+                })
+    
+    return results
 
 
-def save_result(gid, uid, uname, r: GameResult, date):
-    with _db() as db:
-        db.execute("""
-            INSERT INTO results
-                (guild_id, user_id, username, game, score, max_score,
-                 display, puzzle_date)
-            VALUES (?,?,?,?,?,?,?,?)
-            ON CONFLICT(guild_id, user_id, game, puzzle_date) DO UPDATE SET
-                score=excluded.score, max_score=excluded.max_score,
-                display=excluded.display, username=excluded.username,
-                created_at=datetime('now')
-        """, (gid, uid, uname, r.game, r.score, r.max_score,
-              r.display, date))
-
-
-def fetch(gid, *, date=None, start=None, end=None, game=None, uid=None):
-    q, p = "SELECT * FROM results WHERE guild_id=?", [gid]
-    if date:  q += " AND puzzle_date=?";          p.append(date)
-    if start: q += " AND puzzle_date>=?";         p.append(start)
-    if end:   q += " AND puzzle_date<=?";         p.append(end)
-    if game:  q += " AND LOWER(game)=LOWER(?)";  p.append(game)
-    if uid:   q += " AND user_id=?";              p.append(uid)
-    q += " ORDER BY puzzle_date DESC, game, score"
-    with _db() as db:
-        db.row_factory = sqlite3.Row
-        return db.execute(q, p).fetchall()
+def deduplicate_results(results: list[dict]) -> list[dict]:
+    """Keep only the latest result for each user/game/date combination"""
+    # Sort by created_at descending
+    sorted_results = sorted(results, 
+                          key=lambda r: r.get("created_at", ""), 
+                          reverse=True)
+    
+    seen = set()
+    unique = []
+    for r in sorted_results:
+        key = (r["guild_id"], r["user_id"], r["game"], r["puzzle_date"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    
+    return unique
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -394,13 +459,15 @@ def _build_period_embed(title, rows, *, show_detail=False):
     return embed
 
 
-def _add_streaks(embed, gid):
+def _add_streaks(embed, rows):
+    """Calculate and add streaks section to embed"""
+    # Filter to last 90 days
     cutoff = (datetime.now(timezone.utc).date() - timedelta(days=90)).isoformat()
-    rows = fetch(gid, start=cutoff)
-
+    recent_rows = [r for r in rows if r["puzzle_date"] >= cutoff]
+    
     ud: dict[str, set[str]] = defaultdict(set)
     un: dict[str, str]      = {}
-    for r in rows:
+    for r in recent_rows:
         ud[r["user_id"]].add(r["puzzle_date"])
         un[r["user_id"]] = r["username"]
 
@@ -436,14 +503,24 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
+# Store for configured channels (in-memory only now)
+config_store: dict[str, Optional[int]] = {}  # guild_id -> channel_id
+
 
 @bot.event
 async def on_ready():
-    init_db()
+    # Check for monthly reset
+    if store.check_reset():
+        log.info("🗑️  Monthly storage reset performed")
+    
     if not daily_summary.is_running():
         daily_summary.start()
+    if not monthly_reset_check.is_running():
+        monthly_reset_check.start()
+    
     cmds = [c.name for c in bot.commands]
-    log.info("✅  %s online  ·  tracking %d games  ·  prefix: '%s'  ·  commands: %s", bot.user, len(_PARSERS), PREFIX, cmds)
+    log.info("✅  %s online  ·  tracking %d games  ·  prefix: '%s'  ·  commands: %s", 
+             bot.user, len(_PARSERS), PREFIX, cmds)
 
 
 @bot.event
@@ -455,17 +532,22 @@ async def on_command_error(ctx, error):
 async def on_message(msg: discord.Message):
     if msg.author.bot or not msg.guild:
         return
+    
+    # Check for monthly reset when processing messages
+    store.check_reset()
+    
     log.info("MSG from %s: %s", msg.author.display_name, msg.content[:80])
     results = parse_message(msg.content)
     if results:
-        d    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        d    = msg.created_at.strftime("%Y-%m-%d")
         gid  = str(msg.guild.id)
         uid  = str(msg.author.id)
         name = msg.author.display_name
         for r in results:
-            save_result(gid, uid, name, r, d)
+            store.save(gid, uid, name, r, d)
             log.info("  📊  %s  ·  %s %s", name, r.game, r.display)
         await msg.add_reaction("📊")
+    
     try:
         await bot.process_commands(msg)
     except Exception as e:
@@ -476,14 +558,18 @@ async def on_message(msg: discord.Message):
 async def on_message_edit(_before, after: discord.Message):
     if after.author.bot or not after.guild:
         return
+    
+    # Check for monthly reset
+    store.check_reset()
+    
     results = parse_message(after.content)
     if results:
-        d    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        d    = after.created_at.strftime("%Y-%m-%d")
         gid  = str(after.guild.id)
         uid  = str(after.author.id)
         name = after.author.display_name
         for r in results:
-            save_result(gid, uid, name, r, d)
+            store.save(gid, uid, name, r, d)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -539,7 +625,8 @@ async def cmd_lb(ctx, *, args: str = "today"):
         meta = _GAME_META.get(game_name.lower(), {})
         title += f"  ·  {meta.get('icon','🎮')} {game_name}"
 
-    rows = fetch(gid, **kw)
+    # Fetch from in-memory store
+    rows = store.fetch(gid, **kw)
 
     if single_day:
         embed = _build_daily_embed(title, rows)
@@ -548,7 +635,9 @@ async def cmd_lb(ctx, *, args: str = "today"):
         embed = _build_period_embed(title, rows, show_detail=show_detail)
 
     if single_day and not game_name:
-        _add_streaks(embed, gid)
+        # Get all rows for streak calculation
+        all_rows = store.get_all(gid)
+        _add_streaks(embed, all_rows)
 
     await ctx.send(embed=embed)
 
@@ -570,12 +659,14 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     target = member or ctx.author
     gid    = str(ctx.guild.id)
     uid    = str(target.id)
-    rows   = fetch(gid, uid=uid)
+    
+    # Fetch from in-memory store
+    rows = store.fetch(gid, uid=uid)
     if not rows:
         return await ctx.send(
             f"No results for **{target.display_name}** yet.")
 
-    all_rows      = fetch(gid)
+    all_rows      = store.get_all(gid)
     crowns_map, _ = _compute_crowns(all_rows)
 
     by_game: dict[str, list] = defaultdict(list)
@@ -653,7 +744,8 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     if game_name:
         kw["game"] = game_name
 
-    rows = fetch(gid, **kw)
+    # Fetch from in-memory store
+    rows = store.fetch(gid, **kw)
     crowns_map, _ = _compute_crowns(rows)
 
     names: dict[str, str] = {}
@@ -701,13 +793,8 @@ async def cmd_crowns(ctx, *, args: str = "all"):
 @commands.has_permissions(manage_guild=True)
 async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
     gid = str(ctx.guild.id)
-    cid = str(channel.id) if channel else None
-    with _db() as db:
-        db.execute("""
-            INSERT INTO config (guild_id, summary_channel_id) VALUES (?, ?)
-            ON CONFLICT(guild_id)
-            DO UPDATE SET summary_channel_id = excluded.summary_channel_id
-        """, (gid, cid))
+    config_store[gid] = channel.id if channel else None
+    
     if channel:
         await ctx.send(f"✅  Daily recaps → {channel.mention}")
     else:
@@ -735,39 +822,64 @@ async def cmd_help(ctx):
     e.add_field(name="⚙️  Setup", inline=False, value=(
         f"`{PREFIX}games` — list supported games\n"
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
-        f"`{PREFIX}setchannel` — disable auto-post"))
+        f"`{PREFIX}setchannel` — disable auto-post\n\n"
+        f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
     e.set_footer(text="Add new games → edit GAME PARSERS in bot.py")
     await ctx.send(embed=e)
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  DAILY RECAP
+#  DAILY RECAP & MONTHLY RESET
 # ═══════════════════════════════════════════════════════════════════
 
 @tasks.loop(time=dt_time(hour=23, minute=0, tzinfo=ZoneInfo("America/New_York")))
 async def daily_summary():
+    """Post daily leaderboard recap to configured channels"""
     today = datetime.now(ZoneInfo("America/New_York")).date()
     ds = today.isoformat()
+    
     for guild in bot.guilds:
         gid = str(guild.id)
-        with _db() as db:
-            db.row_factory = sqlite3.Row
-            cfg = db.execute(
-                "SELECT summary_channel_id FROM config WHERE guild_id=?",
-                (gid,)).fetchone()
-        if not cfg or not cfg["summary_channel_id"]:
+        channel_id = config_store.get(gid)
+        
+        if not channel_id:
             continue
-        ch = bot.get_channel(int(cfg["summary_channel_id"]))
+            
+        ch = bot.get_channel(channel_id)
         if not ch:
             continue
-        rows = fetch(gid, date=ds)
+            
+        # Fetch from in-memory store
+        rows = store.fetch(gid, date=ds)
         if not rows:
             continue
+            
         embed = _build_daily_embed(
             f"📊  Daily Leaderboard — {today.strftime('%b %d')}", rows)
-        _add_streaks(embed, gid)
+        
+        all_rows = store.get_all(gid)
+        _add_streaks(embed, all_rows)
+        
         await ch.send(embed=embed)
         log.info("Recap sent → %s", guild.name)
+
+
+@tasks.loop(time=dt_time(hour=0, minute=5, tzinfo=ZoneInfo("America/New_York")))
+async def monthly_reset_check():
+    """Check and perform monthly reset"""
+    if store.check_reset():
+        log.info("🗑️  Scheduled monthly reset completed")
+        # Optionally announce reset in configured channels
+        for guild in bot.guilds:
+            gid = str(guild.id)
+            channel_id = config_store.get(gid)
+            if channel_id:
+                ch = bot.get_channel(channel_id)
+                if ch:
+                    try:
+                        await ch.send("🗑️ **Monthly Reset**: Leaderboard data has been cleared for the new month!")
+                    except:
+                        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
