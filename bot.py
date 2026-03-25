@@ -24,7 +24,7 @@ except ImportError:
 
 TOKEN      = os.getenv("DAILY_GAMES_BOT_TOKEN")
 DB_PATH    = os.getenv("DB_PATH", "zailygames.db")
-PREFIX     = os.getenv("BOT_PREFIX", "!zgb")
+PREFIX     = os.getenv("BOT_PREFIX", "!zgb ")
 
 log = logging.getLogger("zailygames")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
