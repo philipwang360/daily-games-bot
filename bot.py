@@ -24,7 +24,7 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════
 
 TOKEN      = os.getenv("DAILY_GAMES_BOT_TOKEN")
-PREFIX     = os.getenv("BOT_PREFIX", "!zgb ")
+PREFIX     = "!zg "  # Hardcoded prefix (was os.getenv("BOT_PREFIX", "!zgb "))
 RESET_DAY  = int(os.getenv("RESET_DAY", "1"))  # Day of month to reset (default: 1st)
 
 log = logging.getLogger("zailygames")
