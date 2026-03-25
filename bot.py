@@ -4,7 +4,7 @@ Zaily Games Leaderboard Bot for Discord — Message History Edition
 Monthly reset to prevent backlog accumulation
 """
 
-import re, os, logging, asyncio
+import re, os, logging, asyncio, unicodedata
 from datetime import datetime, timedelta, timezone, time as dt_time
 from collections import defaultdict
 from typing import Optional
@@ -288,7 +288,7 @@ GAME_LINKS = {
     "WhenTaken": "https://whentaken.com/",
     "Dialed": "https://dialed.wtf/",
     "Catfishing": "https://catfishing.net/",
-    "Feudle": "https://feudle.com/",
+    "Feudle": "https://feudlegame.com/",
     "Doctordle": "https://doctordle.com/",
     "TimeGuessr": "https://timeguessr.com/",
     "Framed": "https://framed.wtf/",
@@ -370,11 +370,19 @@ def deduplicate_results(results: list[dict]) -> list[dict]:
 #  SCORING HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
+def _normalize_game_name(name: str) -> str:
+    """Normalize game name by removing accents and lowercasing"""
+    # Normalize to NFKD form and remove combining characters
+    normalized = unicodedata.normalize('NFKD', name)
+    return ''.join(c for c in normalized if not unicodedata.combining(c)).lower()
+
+
 def _compute_crowns(rows):
     by_gd: dict[tuple, list] = defaultdict(list)
     for r in rows:
         # Skip games that shouldn't count toward crowns
-        if r["game"].lower() in NO_CROWN_GAMES:
+        normalized_name = _normalize_game_name(r["game"])
+        if normalized_name in NO_CROWN_GAMES:
             continue
         by_gd[(r["game"], r["puzzle_date"])].append(r)
 
@@ -948,6 +956,33 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     await ctx.send(embed=e)
 
 
+@bot.command(name="reset")
+@commands.has_permissions(manage_guild=True)
+@commands.cooldown(1, 604800, commands.BucketType.guild)  # Once per week per guild (604800 seconds = 7 days)
+async def cmd_reset(ctx, confirm: str = ""):
+    """Manually reset the leaderboard (requires 'manage_guild' permission, 1 week cooldown)"""
+    if confirm.lower() != "confirm":
+        await ctx.send(
+            "⚠️ **Warning**: This will delete ALL leaderboard data for this server.\n"
+            "To confirm, type: `!zgb reset confirm`\n\n"
+            "*Requires 'Manage Server' permission. 1 week cooldown.*"
+        )
+        return
+    
+    gid = str(ctx.guild.id)
+    
+    # Count how many entries we're deleting
+    count = len([r for r in store.results.values() if r["guild_id"] == gid])
+    
+    # Delete all results for this guild
+    keys_to_delete = [k for k, r in store.results.items() if r["guild_id"] == gid]
+    for k in keys_to_delete:
+        del store.results[k]
+    
+    log.info(f"🗑️  Manual reset by {ctx.author.name}: cleared {count} results for guild {gid}")
+    await ctx.send(f"🗑️ **Leaderboard Reset**: Cleared {count} entries. Fresh start!")
+
+
 @bot.command(name="setchannel")
 @commands.has_permissions(manage_guild=True)
 async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
@@ -978,10 +1013,12 @@ async def cmd_help(ctx):
         f"`{PREFIX}crowns` — crown leaderboard\n"
         f"`{PREFIX}crowns week` / `{PREFIX}crowns wordle`\n"
         f"`{PREFIX}mystats` / `{PREFIX}stats @user`"))
-    e.add_field(name="⚙️  Setup", inline=False, value=(
+    e.add_field(name="⚙️  Setup & Admin", inline=False, value=(
         f"`{PREFIX}games` — list supported games\n"
+        f"`{PREFIX}links` — show all game links\n"
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
-        f"`{PREFIX}setchannel` — disable auto-post\n\n"
+        f"`{PREFIX}setchannel` — disable auto-post\n"
+        f"`{PREFIX}reset confirm` — ⚠️ clear all data (admin only, 1 week cooldown)\n\n"
         f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
     e.set_footer(text="Add new games → edit GAME PARSERS in bot.py")
     await ctx.send(embed=e)
