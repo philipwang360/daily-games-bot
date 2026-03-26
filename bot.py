@@ -758,15 +758,12 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     message_count = 0
     result_count = 0
     
-    # Clear old data for this channel to ensure fresh sync
+    # Note: We do NOT clear old data here anymore
+    # Multiple instances were clearing each other's data causing incomplete results
     gid = str(channel.guild.id)
-    old_keys = [k for k, r in store.results.items() if r["guild_id"] == gid]
-    for k in old_keys:
-        del store.results[k]
-    log.info(f"Cleared {len(old_keys)} old entries before sync")
     
     try:
-        # Fetch all messages from the last 24 hours
+        # Fetch all messages from the specified time period
         # Use larger limit to get more messages
         async for msg in channel.history(limit=2000, after=after, oldest_first=False):
             if msg.author.bot:
@@ -1127,6 +1124,8 @@ async def cmd_help(ctx):
     await send_with_cleanup(ctx, e, "Help")
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  DAILY RECAP & MONTHLY RESET
 # ═══════════════════════════════════════════════════════════════════
 #  DAILY RECAP & MONTHLY RESET
 # ═══════════════════════════════════════════════════════════════════
