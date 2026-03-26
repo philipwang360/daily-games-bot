@@ -493,6 +493,7 @@ async def _manage_crown_reactions(channel, game: str, date: str,
     if len(all_scores) == 1:
         # First score of the day - they could be best OR worst, we don't know!
         # Give them both reactions to keep them humble
+        log.info("First score of the day for %s - giving both 👑 and kelvDank", game)
         return ["👑", "kelvDank"]
     
     # Filter out the new user's score for comparison (we want to compare against existing scores only)
@@ -778,10 +779,17 @@ async def on_message(msg: discord.Message):
                 for emoji in reactions_to_add:
                     try:
                         await msg.add_reaction(emoji)
-                    except discord.HTTPException:
-                        # If custom emoji fails, fall back to 📊
+                    except discord.HTTPException as e:
                         if emoji == "kelvDank":
-                            await msg.add_reaction("📊")
+                            # kelvDank emoji doesn't exist, silently skip it
+                            log.info("kelvDank emoji not available for %s, skipping", r.game)
+                        else:
+                            # For other emojis (👑, 📊), let discord.py handle rate limiting
+                            # or log other errors
+                            log.info("Failed to add %s reaction: %s", emoji, e)
+                    except Exception as e:
+                        # Catch any other errors to prevent breaking the loop
+                        log.info("Error adding %s reaction: %s", emoji, e)
     
     try:
         await bot.process_commands(msg)
