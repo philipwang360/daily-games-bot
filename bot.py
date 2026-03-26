@@ -993,15 +993,14 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     if game_name:
         kw["game"] = game_name
 
-    # Fetch from in-memory store
-    rows = store.fetch(gid, **kw)
-    
-    # If no results, sync from history first
-    if not rows and isinstance(ctx.channel, discord.TextChannel):
+    # Always sync from history for crowns calculation to ensure accuracy
+    if isinstance(ctx.channel, discord.TextChannel):
         await ctx.send("🔄 Fetching leaderboard history...", delete_after=3)
         days_to_sync = 1 if period == "today" else (7 if period == "week" else 30)
         await sync_history_to_store(ctx.channel, days=days_to_sync)
-        rows = store.fetch(gid, **kw)
+    
+    # Fetch results from store (which now has fresh data if we synced)
+    rows = store.fetch(gid, **kw)
     
     crowns_map, _ = _compute_crowns(rows)
 
