@@ -174,6 +174,18 @@ async def _delete_duplicate_messages(channel: discord.TextChannel, keep_message_
         log.info(f"Cleaned up {deleted} duplicate messages in channel {channel.id}")
 
 
+async def send_with_cleanup(ctx, embed, content_preview: str = ""):
+    """Send an embed and cleanup duplicates after 2 seconds"""
+    msg = await ctx.send(embed=embed)
+    
+    # Wait 2 seconds for any duplicates to appear, then clean them up
+    await asyncio.sleep(2)
+    preview = content_preview if content_preview else (embed.title if embed.title else "")
+    await _delete_duplicate_messages(ctx.channel, msg.id, preview)
+    
+    return msg
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  PARSER REGISTRY
 # ═══════════════════════════════════════════════════════════════════
@@ -779,7 +791,7 @@ async def cmd_links(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_footer(text=f"Posted at 8:00 AM ET · {RESET_DAY}th of each month for new leaderboard")
-    await ctx.send(embed=embed)
+    await send_with_cleanup(ctx, embed, "Daily Games Links")
 
 
 @bot.command(name="lb", aliases=["leaderboard"])
@@ -849,7 +861,7 @@ async def cmd_lb(ctx, *, args: str = "today"):
         all_rows = store.get_all(gid)
         _add_streaks(embed, all_rows)
 
-    await ctx.send(embed=embed)
+    await send_with_cleanup(ctx, embed, title)
 
 
 @bot.command(name="games")
@@ -861,7 +873,7 @@ async def cmd_games(ctx):
     e = discord.Embed(title="🎲  Supported Games", color=0x57F287,
                       description="\n".join(lines))
     e.set_footer(text="Paste a game's share text and I'll track it automatically!")
-    await ctx.send(embed=e)
+    await send_with_cleanup(ctx, e, "Supported Games")
 
 
 @bot.command(name="mystats", aliases=["stats"])
@@ -928,7 +940,7 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     dates = set(r["puzzle_date"] for r in rows)
     e.description = (f"**{total_plays}** plays across **{len(dates)}** days "
                      f"· **{total_crowns}** 👑 total")
-    await ctx.send(embed=e)
+    await send_with_cleanup(ctx, e, f"{target.display_name} Stats")
 
 
 @bot.command(name="crowns")
@@ -1018,7 +1030,7 @@ async def cmd_crowns(ctx, *, args: str = "all"):
             f"╰ {breakdown}")
 
     e.description = "\n".join(lines)
-    await ctx.send(embed=e)
+    await send_with_cleanup(ctx, e, title)
 
 
 @bot.command(name="reset")
@@ -1083,7 +1095,7 @@ async def cmd_help(ctx):
         f"`{PREFIX}reset confirm` — ⚠️ clear all data\n\n"
         f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
     e.set_footer(text="Add new games → edit GAME PARSERS in bot.py")
-    await ctx.send(embed=e)
+    await send_with_cleanup(ctx, e, "Help")
 
 
 # ═══════════════════════════════════════════════════════════════════
