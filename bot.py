@@ -525,6 +525,8 @@ def _add_streaks(embed, rows):
 
 async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     """Fetch message history and populate the store"""
+    gid = str(channel.guild.id)
+    
     if days == 1:
         now_et = datetime.now(ZoneInfo("America/New_York"))
         today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -532,9 +534,16 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     else:
         after = datetime.now(timezone.utc) - timedelta(days=days)
     
+    # Check crown reset date - only fetch from after reset
+    crown_reset_date = store.get_crown_reset_date(gid)
+    if crown_reset_date:
+        reset_utc = crown_reset_date.astimezone(timezone.utc)
+        if reset_utc > after:
+            after = reset_utc
+            log.info(f"Using crown reset date {after} as fetch cutoff")
+    
     message_count = 0
     result_count = 0
-    gid = str(channel.guild.id)
     
     # Clear old data for this guild to ensure fresh sync
     old_keys = [k for k, r in store.results.items() if r["guild_id"] == gid]
