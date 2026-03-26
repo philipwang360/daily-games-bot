@@ -38,12 +38,14 @@ MEDALS = ["🥇", "🥈", "🥉"]
 # ═══════════════════════════════════════════════════════════════════
 
 class ResultsStore:
-    """In-memory storage with monthly reset"""
+    """In-memory storage with monthly reset and crown tracking"""
     
     def __init__(self):
         # Structure: {(guild_id, user_id, game, date): GameResult}
         self.results: dict[tuple, dict] = {}
         self.current_month: int = datetime.now(timezone.utc).month
+        # Track crown reset dates per guild: {guild_id: datetime}
+        self.crown_reset_dates: dict[str, datetime] = {}
     
     def check_reset(self):
         """Reset storage if we've entered a new month"""
@@ -55,6 +57,18 @@ class ResultsStore:
             log.info("🗑️  Monthly reset triggered: cleared %d results from month %d", 
                      len(self.results), old_month)
             return True
+        return False
+    
+    def reset_crowns(self, guild_id: str):
+        """Reset crown count for a guild - crowns will only count from now forward"""
+        now = datetime.now(timezone.utc)
+        self.crown_reset_dates[guild_id] = now
+        log.info(f"👑 Crowns reset for guild {guild_id} at {now}")
+        return now
+    
+    def get_crown_reset_date(self, guild_id: str) -> Optional[datetime]:
+        """Get the crown reset date for a guild, or None if never reset"""
+        return self.crown_reset_dates.get(guild_id)
         return False
     
     def save(self, guild_id: str, user_id: str, username: str, 
@@ -473,8 +487,14 @@ def _normalize_game_name(name: str) -> str:
     return ''.join(c for c in normalized if not unicodedata.combining(c)).lower()
 
 
-def _compute_crowns(rows):
+def _compute_crowns(rows, guild_id: str = ""):
     by_gd: dict[tuple, list] = defaultdict(list)
+    
+    # Get crown reset date for this guild
+    crown_reset_date = None
+    if guild_id:
+        crown_reset_date = store.get_crown_reset_date(guild_id)
+    
     for r in rows:
         # Skip games that shouldn't count toward crowns
         normalized_name = _normalize_game_name(r["game"])
@@ -484,6 +504,13 @@ def _compute_crowns(rows):
         # Skip failed attempts where score > max_score (e.g., X/6 in Wordle = 7/6, failed Framed = 7/6)
         if r["score"] > r["max_score"]:
             continue
+        
+        # Skip results before crown reset date
+        if crown_reset_date:
+            result_date = datetime.strptime(r["puzzle_date"], "%Y-%m-%d")
+            result_date = result_date.replace(tzinfo=timezone.utc)
+            if result_date < crown_reset_date.date():
+                continue
             
         by_gd[(r["game"], r["puzzle_date"])].append(r)
 
@@ -586,7 +613,9 @@ def _build_period_embed(title, rows, *, show_detail=False):
         embed.description = "No results for this period!"
         return embed
 
-    user_crowns, daily_winners = _compute_crowns(rows)
+    # Get guild_id from first row if available
+    gid = rows[0]["guild_id"] if rows else ""
+    user_crowns, daily_winners = _compute_crowns(rows, gid)
 
     for game_name in sorted(by_game):
         users = by_game[game_name]
@@ -965,7 +994,7 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
             f"No results for **{target.display_name}** yet.")
 
     all_rows      = store.get_all(gid)
-    crowns_map, _ = _compute_crowns(all_rows)
+    crowns_map, _ = _compute_crowns(all_rows, gid)
 
     by_game: dict[str, list] = defaultdict(list)
     for r in rows:
@@ -1056,7 +1085,7 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     # Fetch results from store (which now has fresh data if we synced)
     rows = store.fetch(gid, **kw)
     
-    crowns_map, _ = _compute_crowns(rows)
+    crowns_map, _ = _compute_crowns(rows, gid)
 
     names: dict[str, str] = {}
     for r in rows:
@@ -1126,6 +1155,33 @@ async def cmd_reset(ctx, confirm: str = ""):
     await ctx.send(f"🗑️ **Leaderboard Reset**: Cleared {count} entries. Fresh start!")
 
 
+@bot.command(name="resetcrowns")
+@commands.has_permissions(manage_guild=True)
+async def cmd_reset_crowns(ctx, confirm: str = ""):
+    """Reset crown counts to 0 - crowns will only count from now forward (requires 'manage_guild' permission)"""
+    if confirm.lower() != "confirm":
+        await ctx.send(
+            "⚠️ **Warning**: This will reset ALL crown counts to 0.\n"
+            "Today's leaderboard data will be preserved, but crowns will only count from now forward.\n"
+            "To confirm, type: `!zg resetcrowns confirm`\n\n"
+            "*Requires 'Manage Server' permission.*"
+        )
+        return
+    
+    gid = str(ctx.guild.id)
+    
+    # Set the crown reset date to now
+    reset_date = store.reset_crowns(gid)
+    
+    # Format the date nicely
+    formatted_date = reset_date.strftime("%B %d, %Y at %I:%M %p ET")
+    
+    log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} at {reset_date}")
+    await ctx.send(f"👑 **Crowns Reset**: Crown counts reset to 0!\n"
+                   f"Crowns will now only count from **{formatted_date}** forward.\n"
+                   f"Today's leaderboard data is preserved.")
+
+
 @bot.command(name="setchannel")
 @commands.has_permissions(manage_guild=True)
 async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
@@ -1161,14 +1217,13 @@ async def cmd_help(ctx):
         f"`{PREFIX}links` — show all game links\n"
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
         f"`{PREFIX}setchannel` — disable auto-post\n"
-        f"`{PREFIX}reset confirm` — ⚠️ clear all data\n\n"
+        f"`{PREFIX}reset confirm` — ⚠️ clear all data\n"
+        f"`{PREFIX}resetcrowns confirm` — 👑 reset crown counts to 0\n\n"
         f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
     e.set_footer(text="Add new games → edit GAME PARSERS in bot.py")
     await send_with_cleanup(ctx, e, "Help")
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  DAILY RECAP & MONTHLY RESET
 # ═══════════════════════════════════════════════════════════════════
 #  DAILY RECAP & MONTHLY RESET
 # ═══════════════════════════════════════════════════════════════════
