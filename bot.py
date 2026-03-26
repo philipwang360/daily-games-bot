@@ -826,19 +826,33 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     # Multiple instances were clearing each other's data causing incomplete results
     gid = str(channel.guild.id)
     
-    # However, we DO need to clear data older than the sync period
-    # Otherwise yesterday's data shows up in today's leaderboard
+    # Clear data from before the sync period AND before crown reset date
+    # Calculate the cutoff date based on days parameter
     if days == 1:
-        # Clear data from before today (midnight ET)
-        today_start_et = datetime.now(ZoneInfo("America/New_York")).replace(hour=0, minute=0, second=0, microsecond=0)
-        today_str = today_start_et.strftime("%Y-%m-%d")
-        
-        old_keys = [k for k, r in store.results.items() 
-                    if r["guild_id"] == gid and r["puzzle_date"] != today_str]
-        for k in old_keys:
-            del store.results[k]
-        if old_keys:
-            log.info(f"Cleared {len(old_keys)} old entries (not from today)")
+        # For 1 day (today), keep only today
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        cutoff_date = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_str = cutoff_date.strftime("%Y-%m-%d")
+    else:
+        # For multiple days, calculate cutoff
+        cutoff_date = datetime.now(ZoneInfo("America/New_York")) - timedelta(days=days)
+        cutoff_str = cutoff_date.strftime("%Y-%m-%d")
+    
+    # Also check crown reset date - use the MORE RECENT cutoff
+    crown_reset_date = store.get_crown_reset_date(gid)
+    if crown_reset_date:
+        crown_reset_str = crown_reset_date.strftime("%Y-%m-%d")
+        # If crown was reset more recently than the sync cutoff, use that
+        if crown_reset_str > cutoff_str:
+            cutoff_str = crown_reset_str
+            log.info(f"Using crown reset date {cutoff_str} as cutoff instead of sync cutoff")
+    
+    old_keys = [k for k, r in store.results.items() 
+                if r["guild_id"] == gid and r["puzzle_date"] < cutoff_str]
+    for k in old_keys:
+        del store.results[k]
+    if old_keys:
+        log.info(f"Cleared {len(old_keys)} old entries (before {cutoff_str})")
     
     try:
         # Fetch all messages from the specified time period
@@ -1063,8 +1077,8 @@ async def cmd_crowns(ctx, *, args: str = "all"):
         period     = "all"
         game_query = None
     else:
-        period     = "all"
-        game_query = args.strip()
+        period     = "month"  # Default to month for crowns
+        game_query = args.strip() if args.strip() not in PERIODS else None
 
     game_name = _match_game(game_query) if game_query else None
 
