@@ -826,6 +826,20 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     # Multiple instances were clearing each other's data causing incomplete results
     gid = str(channel.guild.id)
     
+    # However, we DO need to clear data older than the sync period
+    # Otherwise yesterday's data shows up in today's leaderboard
+    if days == 1:
+        # Clear data from before today (midnight ET)
+        today_start_et = datetime.now(ZoneInfo("America/New_York")).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_str = today_start_et.strftime("%Y-%m-%d")
+        
+        old_keys = [k for k, r in store.results.items() 
+                    if r["guild_id"] == gid and r["puzzle_date"] != today_str]
+        for k in old_keys:
+            del store.results[k]
+        if old_keys:
+            log.info(f"Cleared {len(old_keys)} old entries (not from today)")
+    
     try:
         # Fetch all messages from the specified time period
         # Use larger limit to get more messages
