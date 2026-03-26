@@ -4,7 +4,7 @@ Zaily Games Leaderboard Bot for Discord — Message History Edition
 Monthly reset to prevent backlog accumulation
 """
 
-import re, os, logging, asyncio, unicodedata
+import re, os, logging, asyncio, unicodedata, random
 from datetime import datetime, timedelta, timezone, time as dt_time
 from collections import defaultdict
 from typing import Optional
@@ -121,6 +121,11 @@ class ResultsStore:
 
 # Global storage instance
 store = ResultsStore()
+
+# Instance identification for debugging
+import random
+INSTANCE_ID = f"instance_{random.randint(1000, 9999)}_{datetime.now().strftime('%H%M%S')}"
+log.info(f"Bot starting with instance ID: {INSTANCE_ID}")
 
 
 def _get_content_hash(content: str) -> str:
@@ -834,7 +839,7 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
         cutoff_date = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
         cutoff_str = cutoff_date.strftime("%Y-%m-%d")
     else:
-        # For multiple days, calculate cutoff
+        # For multiple days, calculate cutoff (use reset date if more recent)
         cutoff_date = datetime.now(ZoneInfo("America/New_York")) - timedelta(days=days)
         cutoff_str = cutoff_date.strftime("%Y-%m-%d")
     
@@ -845,7 +850,12 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
         # If crown was reset more recently than the sync cutoff, use that
         if crown_reset_str > cutoff_str:
             cutoff_str = crown_reset_str
-            log.info(f"Using crown reset date {cutoff_str} as cutoff instead of sync cutoff")
+            log.info(f"Using crown reset date {cutoff_str} as cutoff (more recent than sync cutoff)")
+    
+    # Debug: Show what we're about to clear
+    all_dates_in_store = set(r["puzzle_date"] for k, r in store.results.items() if r["guild_id"] == gid)
+    log.info(f"Dates currently in store for guild {gid}: {sorted(all_dates_in_store)}")
+    log.info(f"Cutoff date for clearing: {cutoff_str}")
     
     old_keys = [k for k, r in store.results.items() 
                 if r["guild_id"] == gid and r["puzzle_date"] < cutoff_str]
@@ -853,26 +863,51 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
         del store.results[k]
     if old_keys:
         log.info(f"Cleared {len(old_keys)} old entries (before {cutoff_str})")
+    else:
+        log.info(f"No entries to clear (all dates are >= {cutoff_str})")
     
     try:
-        # Fetch all messages from the specified time period
-        # Use larger limit to get more messages
-        async for msg in channel.history(limit=2000, after=after, oldest_first=False):
-            if msg.author.bot:
-                continue
+        # Fetch messages in batches to avoid rate limits
+        # Discord allows ~5 requests per second for message history
+        batch_size = 100
+        total_fetched = 0
+        last_id = None
+        
+        while total_fetched < 2000:
+            batch_count = 0
+            batch_messages = []
             
-            results = parse_message(msg.content)
-            if results:
-                date_str = msg.created_at.strftime("%Y-%m-%d")
-                uid = str(msg.author.id)
-                name = msg.author.display_name
+            # Fetch a batch
+            async for msg in channel.history(limit=batch_size, before=last_id, after=after, oldest_first=False):
+                if msg.author.bot:
+                    continue
                 
-                for r in results:
-                    store.save(gid, uid, name, r, date_str)
-                    result_count += 1
-            message_count += 1
+                results = parse_message(msg.content)
+                if results:
+                    date_str = msg.created_at.strftime("%Y-%m-%d")
+                    uid = str(msg.author.id)
+                    name = msg.author.display_name
+                    
+                    for r in results:
+                        store.save(gid, uid, name, r, date_str)
+                        result_count += 1
+                
+                batch_count += 1
+                message_count += 1
+                last_id = msg.id
+            
+            total_fetched += batch_count
+            
+            # If we got less than batch_size, we've reached the end
+            if batch_count < batch_size:
+                log.info(f"Reached end of history after {total_fetched} messages")
+                break
+            
+            # Small delay to avoid rate limits (200ms between batches)
+            await asyncio.sleep(0.2)
+            
     except discord.HTTPException as e:
-        log.error("Error fetching history: %s", e)
+        log.error(f"Error fetching history: {e}")
     
     log.info(f"Synced {message_count} messages, found {result_count} game results from last {days} days")
     return result_count
@@ -1104,6 +1139,11 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     
     # Fetch results from store (which now has fresh data if we synced)
     rows = store.fetch(gid, **kw)
+    
+    # Debug: Show what dates we have and crown reset info
+    dates_in_results = set(r["puzzle_date"] for r in rows)
+    crown_reset = store.get_crown_reset_date(gid)
+    log.info(f"CROWNS: Reset date: {crown_reset}, Dates in data: {sorted(dates_in_results)}, Total rows: {len(rows)}")
     
     crowns_map, _ = _compute_crowns(rows, gid)
 
