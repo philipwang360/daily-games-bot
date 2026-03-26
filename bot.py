@@ -38,11 +38,13 @@ MEDALS = ["🥇", "🥈", "🥉"]
 # ═══════════════════════════════════════════════════════════════════
 
 class ResultsStore:
-    """In-memory storage with monthly reset"""
+    """In-memory storage with monthly reset and crown tracking"""
     
     def __init__(self):
         self.results: dict[tuple, dict] = {}
         self.current_month: int = datetime.now(timezone.utc).month
+        # Track crown reset dates per guild: {guild_id: datetime}
+        self.crown_reset_dates: dict[str, datetime] = {}
     
     def check_reset(self):
         """Reset storage if we've entered a new month"""
@@ -55,6 +57,19 @@ class ResultsStore:
                      len(self.results), old_month)
             return True
         return False
+    
+    def reset_crowns(self, guild_id: str):
+        """Reset crown count for a guild - crowns will only count from today forward (not exact time)"""
+        # Use today's date in Eastern Time (midnight), not exact timestamp
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        self.crown_reset_dates[guild_id] = today_start_et
+        log.info(f"👑 Crowns reset for guild {guild_id} at {today_start_et} (all games from today count)")
+        return today_start_et
+    
+    def get_crown_reset_date(self, guild_id: str) -> Optional[datetime]:
+        """Get the crown reset date for a guild, or None if never reset"""
+        return self.crown_reset_dates.get(guild_id)
     
     def save(self, guild_id: str, user_id: str, username: str, 
              game_result, date_str: str):
@@ -300,14 +315,26 @@ def _normalize_game_name(name: str) -> str:
     return ''.join(c for c in normalized if not unicodedata.combining(c)).lower()
 
 
-def _compute_crowns(rows):
+def _compute_crowns(rows, guild_id: str = ""):
     by_gd: dict[tuple, list] = defaultdict(list)
+    
+    # Get crown reset date for this guild
+    crown_reset_date = store.get_crown_reset_date(guild_id) if guild_id else None
+    
     for r in rows:
         normalized_name = _normalize_game_name(r["game"])
         if normalized_name in NO_CROWN_GAMES:
             continue
         if r["score"] > r["max_score"]:
             continue
+        
+        # Skip results before crown reset date
+        if crown_reset_date:
+            result_date = datetime.strptime(r["puzzle_date"], "%Y-%m-%d").date()
+            reset_date = crown_reset_date.date()
+            if result_date < reset_date:
+                continue
+            
         by_gd[(r["game"], r["puzzle_date"])].append(r)
 
     user_crowns:   dict[tuple, int]       = defaultdict(int)
@@ -393,7 +420,7 @@ def _build_daily_embed(title, rows):
     return embed
 
 
-def _build_period_embed(title, rows, *, show_detail=False):
+def _build_period_embed(title, rows, *, show_detail=False, guild_id: str = ""):
     by_game: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     for r in rows:
         by_game[r["game"]][r["user_id"]].append(r)
@@ -404,7 +431,7 @@ def _build_period_embed(title, rows, *, show_detail=False):
         embed.description = "No results for this period!"
         return embed
 
-    user_crowns, daily_winners = _compute_crowns(rows)
+    user_crowns, daily_winners = _compute_crowns(rows, guild_id)
 
     for game_name in sorted(by_game):
         users = by_game[game_name]
@@ -717,7 +744,7 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
         return await ctx.send(f"No results for **{target.display_name}** yet.")
 
     all_rows      = store.get_all(gid)
-    crowns_map, _ = _compute_crowns(all_rows)
+    crowns_map, _ = _compute_crowns(all_rows, gid)
 
     by_game: dict[str, list] = defaultdict(list)
     for r in rows:
@@ -799,7 +826,7 @@ async def cmd_crowns(ctx, *, args: str = "month"):
         await sync_history_to_store(ctx.channel, days=days_to_sync)
     
     rows = store.fetch(gid, **kw)
-    crowns_map, _ = _compute_crowns(rows)
+    crowns_map, _ = _compute_crowns(rows, gid)
 
     names: dict[str, str] = {}
     for r in rows:
@@ -844,6 +871,33 @@ async def cmd_crowns(ctx, *, args: str = "month"):
     await ctx.send(embed=e)
 
 
+@bot.command(name="resetcrowns")
+@commands.has_permissions(manage_guild=True)
+async def cmd_reset_crowns(ctx, confirm: str = ""):
+    """Reset crown counts to 0 - crowns will only count from now forward"""
+    if confirm.lower() != "confirm":
+        await ctx.send(
+            "⚠️ **Warning**: This will reset ALL crown counts to 0.\n"
+            "Leaderboard data will be preserved, but crowns will only count from now forward.\n"
+            "To confirm, type: `!zg resetcrowns confirm`\n\n"
+            "*Requires 'Manage Server' permission.*"
+        )
+        return
+    
+    gid = str(ctx.guild.id)
+    
+    # Set the crown reset date to now
+    reset_date = store.reset_crowns(gid)
+    
+    # Format the date nicely
+    formatted_date = reset_date.strftime("%B %d, %Y at %I:%M %p ET")
+    
+    log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} at {reset_date}")
+    await ctx.send(f"👑 **Crowns Reset**: Crown counts reset to 0!\n"
+                   f"Crowns will now only count from **{formatted_date}** forward.\n"
+                   f"Today's leaderboard data is preserved.")
+
+
 @bot.command(name="setchannel")
 @commands.has_permissions(manage_guild=True)
 async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
@@ -872,13 +926,17 @@ async def cmd_help(ctx):
     e.add_field(name="👑  Crowns & Stats", inline=False, value=(
         f"`{PREFIX}crowns` — crown leaderboard (default: month)\n"
         f"`{PREFIX}crowns week` / `{PREFIX}crowns wordle`\n"
-        f"`{PREFIX}mystats` / `{PREFIX}stats @user`"))
-    e.add_field(name="⚙️  Setup", inline=False, value=(
+        f"`{PREFIX}mystats` / `{PREFIX}stats @user`\n"
+        f"`{PREFIX}resetcrowns confirm` — 👑 reset crown counts (admin only)"))
+    e.add_field(name="⚙️  Admin Commands", inline=False, value=(
+        f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
+        f"`{PREFIX}setchannel` — disable auto-post\n"
+        f"`{PREFIX}resetcrowns confirm` — reset crown competition\n\n"
+        f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
+    e.add_field(name="📚  Other Commands", inline=False, value=(
         f"`{PREFIX}games` — list supported games\n"
         f"`{PREFIX}links` — show all game links\n"
-        f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
-        f"`{PREFIX}sync` — manually sync message history\n\n"
-        f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
+        f"`{PREFIX}sync` — manually sync message history"))
     e.set_footer(text="Add new games → edit GAME PARSERS in bot.py")
     await ctx.send(embed=e)
 
