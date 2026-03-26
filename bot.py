@@ -495,37 +495,47 @@ async def _manage_crown_reactions(channel, game: str, date: str,
         # Give them both reactions to keep them humble
         return ["👑", "kelvDank"]
     
-    # Find current best and worst
-    best_score, current_winners = _find_current_winners_and_best(all_scores, game)
-    worst_score, current_losers = _find_current_worst(all_scores, game)
+    # Filter out the new user's score for comparison (we want to compare against existing scores only)
+    other_scores = [r for r in all_scores if r["user_id"] != new_user_id]
+    
+    # Find current best and worst among OTHER users (not including the new submission)
+    best_score, current_winners = _find_current_winners_and_best(other_scores, game)
+    worst_score, current_losers = _find_current_worst(other_scores, game)
     
     low = _is_lower_is_better(game)
     reactions_to_add = []
     
     # Handle crown logic
-    if new_score == best_score:
+    if best_score is None:
+        # No other scores yet (shouldn't happen since len > 1, but safety check)
+        reactions_to_add.append("👑")
+    elif new_score == best_score:
         # Tie for best - get crown
         reactions_to_add.append("👑")
     elif (new_score < best_score) if low else (new_score > best_score):
         # New best! Remove crown from previous winner(s)
         for winner_id in current_winners:
-            if winner_id != new_user_id:
-                for r in all_scores:
-                    if r["user_id"] == winner_id and r.get("message_id"):
-                        await _remove_reaction_from_message(channel, r["message_id"], "👑")
-                        break
+            for r in other_scores:
+                if r["user_id"] == winner_id and r.get("message_id"):
+                    await _remove_reaction_from_message(channel, r["message_id"], "👑")
+                    break
         reactions_to_add.append("👑")
     
     # Handle kelvDank logic (only if not also getting crown)
     if "👑" not in reactions_to_add:
-        if new_score == worst_score:
+        if worst_score is None:
+            # No other scores (safety check)
+            reactions_to_add.append("kelvDank")
+        elif new_score == worst_score:
+            # Tie for worst - get kelvDank
+            reactions_to_add.append("kelvDank")
+        elif (new_score > worst_score) if low else (new_score < worst_score):
             # New worst! Remove kelvDank from previous loser(s)
             for loser_id in current_losers:
-                if loser_id != new_user_id:
-                    for r in all_scores:
-                        if r["user_id"] == loser_id and r.get("message_id"):
-                            await _remove_reaction_from_message(channel, r["message_id"], "kelvDank")
-                            break
+                for r in other_scores:
+                    if r["user_id"] == loser_id and r.get("message_id"):
+                        await _remove_reaction_from_message(channel, r["message_id"], "kelvDank")
+                        break
             reactions_to_add.append("kelvDank")
         else:
             # Just a regular score
