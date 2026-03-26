@@ -108,9 +108,6 @@ class ResultsStore:
 # Global storage instance
 store = ResultsStore()
 
-# Track recently sent messages to prevent duplicates (bot messages only)
-_recent_messages: dict[tuple, list] = {}  # (channel_id, content_hash): [(message_id, timestamp)]
-
 
 def _get_content_hash(content: str) -> str:
     """Generate a simple hash of message content for comparison"""
@@ -120,24 +117,36 @@ def _get_content_hash(content: str) -> str:
 
 
 async def _check_and_handle_duplicate(channel: discord.TextChannel, content: str) -> bool:
-    """Check if bot already sent this message recently. Returns True if duplicate detected (prevents sending new message)."""
+    """Check channel history for duplicate bot messages and delete them. Returns True if duplicate found."""
     content_hash = _get_content_hash(content)
-    key = (str(channel.id), content_hash)
     
-    now = datetime.now(timezone.utc)
-    
-    # Clean old entries (older than 30 seconds)
-    if key in _recent_messages:
-        _recent_messages[key] = [
-            (msg_id, timestamp) for msg_id, timestamp in _recent_messages[key]
-            if (now - timestamp).seconds < 30
-        ]
-    
-    # Check for duplicates
-    if key in _recent_messages and len(_recent_messages[key]) > 0:
-        # This is a duplicate - don't send again!
-        log.warning(f"Duplicate message detected in channel {channel.id}, content: {content_hash[:50]}...")
-        return True
+    try:
+        # Look at recent messages (last 10 messages in last 60 seconds)
+        async for msg in channel.history(limit=10, oldest_first=False):
+            # Skip if older than 60 seconds
+            if (datetime.now(timezone.utc) - msg.created_at).seconds > 60:
+                break
+            
+            # Only check bot's own messages
+            if msg.author.id != bot.user.id:
+                continue
+            
+            # Check if content matches
+            if msg.embeds:
+                # For embeds, check title
+                msg_content = msg.embeds[0].title if msg.embeds else ""
+                msg_hash = _get_content_hash(msg_content)
+                
+                if msg_hash == content_hash:
+                    # Found a duplicate! Delete it
+                    try:
+                        await msg.delete()
+                        log.info(f"Deleted duplicate message {msg.id} in channel {channel.id}")
+                    except discord.HTTPException as e:
+                        log.error(f"Failed to delete duplicate: {e}")
+                    return True
+    except discord.HTTPException as e:
+        log.error(f"Error checking channel history: {e}")
     
     return False
 
@@ -317,7 +326,7 @@ GAME_LINKS = {
     "Wordle": "https://www.nytimes.com/games/wordle/index.html",
     "Pokédle": "https://pokedle.net/",
     "LoLdle": "https://loldle.net/",
-    "Narutodle": "https://narutodle.com/",
+    "Narutodle": "https://narutodle.net/",
     "WhenTaken": "https://whentaken.com/",
     "Dialed": "https://dialed.gg/",
     "Catfishing": "https://catfishing.net/",
@@ -1092,15 +1101,7 @@ async def daily_summary():
         all_rows = store.get_all(gid)
         _add_streaks(embed, all_rows)
         
-        msg = await ch.send(embed=embed)
-        
-        # Track this message
-        content_hash = _get_content_hash(content_preview)
-        key = (str(ch.id), content_hash)
-        if key not in _recent_messages:
-            _recent_messages[key] = []
-        _recent_messages[key].append((msg.id, datetime.now(timezone.utc)))
-        
+        await ch.send(embed=embed)
         log.info("Recap sent → %s", guild.name)
 
 
@@ -1160,15 +1161,7 @@ async def daily_links():
         )
         embed.set_footer(text=f"{today.strftime('%A, %B %d')} · Good luck!")
         
-        msg = await ch.send(embed=embed)
-        
-        # Track this message
-        content_hash = _get_content_hash(content_preview)
-        key = (str(ch.id), content_hash)
-        if key not in _recent_messages:
-            _recent_messages[key] = []
-        _recent_messages[key].append((msg.id, datetime.now(timezone.utc)))
-        
+        await ch.send(embed=embed)
         log.info("Links sent → %s", guild.name)
 
 
