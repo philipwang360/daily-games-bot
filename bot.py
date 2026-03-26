@@ -116,39 +116,62 @@ def _get_content_hash(content: str) -> str:
     return normalized[:200]  # First 200 chars should be enough
 
 
-async def _check_and_handle_duplicate(channel: discord.TextChannel, content: str) -> bool:
-    """Check channel history for duplicate bot messages and delete them. Returns True if duplicate found."""
-    content_hash = _get_content_hash(content)
+def _get_similarity_score(s1: str, s2: str) -> float:
+    """Simple similarity check between two strings (0-1)"""
+    if not s1 or not s2:
+        return 0.0
+    # Simple word overlap
+    words1 = set(s1.split())
+    words2 = set(s2.split())
+    if not words1 or not words2:
+        return 0.0
+    intersection = words1 & words2
+    union = words1 | words2
+    return len(intersection) / len(union) if union else 0.0
+
+
+async def _delete_duplicate_messages(channel: discord.TextChannel, keep_message_id: int, content_preview: str):
+    """Delete all similar bot messages except the one with keep_message_id"""
+    content_hash = _get_content_hash(content_preview)
+    deleted = 0
     
     try:
-        # Look at recent messages (last 10 messages in last 60 seconds)
+        # Look at recent messages (last 10 messages in last 5 minutes)
         async for msg in channel.history(limit=10, oldest_first=False):
-            # Skip if older than 60 seconds
-            if (datetime.now(timezone.utc) - msg.created_at).seconds > 60:
+            # Skip if older than 5 minutes
+            if (datetime.now(timezone.utc) - msg.created_at).seconds > 300:
                 break
             
-            # Only check bot's own messages
-            if msg.author.id != bot.user.id:
+            # Skip the message we want to keep
+            if msg.id == keep_message_id:
+                continue
+            
+            # Only delete bot's own messages
+            if not msg.author.bot:
                 continue
             
             # Check if content matches
+            msg_content = ""
             if msg.embeds:
-                # For embeds, check title
-                msg_content = msg.embeds[0].title if msg.embeds else ""
-                msg_hash = _get_content_hash(msg_content)
-                
-                if msg_hash == content_hash:
-                    # Found a duplicate! Delete it
-                    try:
-                        await msg.delete()
-                        log.info(f"Deleted duplicate message {msg.id} in channel {channel.id}")
-                    except discord.HTTPException as e:
-                        log.error(f"Failed to delete duplicate: {e}")
-                    return True
+                msg_content = msg.embeds[0].title if msg.embeds[0].title else ""
+            else:
+                msg_content = msg.content
+            
+            msg_hash = _get_content_hash(msg_content)
+            
+            # Check for similarity
+            if content_hash in msg_hash or msg_hash in content_hash or _get_similarity_score(content_hash, msg_hash) > 0.8:
+                try:
+                    await msg.delete()
+                    deleted += 1
+                    log.info(f"Deleted duplicate message {msg.id}")
+                except discord.HTTPException as e:
+                    log.error(f"Failed to delete duplicate {msg.id}: {e}")
     except discord.HTTPException as e:
-        log.error(f"Error checking channel history: {e}")
+        log.error(f"Error in cleanup: {e}")
     
-    return False
+    if deleted > 0:
+        log.info(f"Cleaned up {deleted} duplicate messages in channel {channel.id}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1089,20 +1112,19 @@ async def daily_summary():
         if not rows:
             continue
             
-        # Check for duplicate message before sending
-        content_preview = f"Daily Leaderboard — {today.strftime('%b %d')}"
-        if await _check_and_handle_duplicate(ch, content_preview):
-            log.warning(f"Skipping duplicate daily summary for {guild.name}")
-            continue
-            
         embed = _build_daily_embed(
             f"📊  Daily Leaderboard — {today.strftime('%b %d')}", rows)
         
         all_rows = store.get_all(gid)
         _add_streaks(embed, all_rows)
         
-        await ch.send(embed=embed)
+        # Send the message
+        msg = await ch.send(embed=embed)
         log.info("Recap sent → %s", guild.name)
+        
+        # Wait 2 seconds for any duplicates to appear, then clean them up
+        await asyncio.sleep(2)
+        await _delete_duplicate_messages(ch, msg.id, f"Daily Leaderboard — {today.strftime('%b %d')}")
 
 
 @tasks.loop(time=dt_time(hour=0, minute=5, tzinfo=ZoneInfo("America/New_York")))
@@ -1137,14 +1159,8 @@ async def daily_links():
         if not ch:
             continue
         
-        # Get today's date first
+        # Get today's date
         today = datetime.now(ZoneInfo("America/New_York"))
-        
-        # Check for duplicate before sending
-        content_preview = f"Daily Games Links — {today.strftime('%b %d')}"
-        if await _check_and_handle_duplicate(ch, content_preview):
-            log.warning(f"Skipping duplicate links for {guild.name}")
-            continue
         
         # Build links embed
         lines = []
@@ -1161,8 +1177,13 @@ async def daily_links():
         )
         embed.set_footer(text=f"{today.strftime('%A, %B %d')} · Good luck!")
         
-        await ch.send(embed=embed)
+        # Send the message
+        msg = await ch.send(embed=embed)
         log.info("Links sent → %s", guild.name)
+        
+        # Wait 2 seconds for any duplicates to appear, then clean them up
+        await asyncio.sleep(2)
+        await _delete_duplicate_messages(ch, msg.id, f"Daily Games Links — {today.strftime('%b %d')}")
 
 
 # ═══════════════════════════════════════════════════════════════════
