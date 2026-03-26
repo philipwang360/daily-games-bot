@@ -4,7 +4,7 @@ Zaily Games Leaderboard Bot for Discord — Message History Edition
 Monthly reset to prevent backlog accumulation
 """
 
-import re, os, logging, asyncio, unicodedata
+import re, os, logging, asyncio, unicodedata, time as monotime
 from datetime import datetime, timedelta, timezone, time as dt_time
 from collections import defaultdict
 from typing import Optional
@@ -754,8 +754,7 @@ async def on_message(msg: discord.Message):
     
     # Deduplicate commands within a short time window
     # Discord sometimes delivers duplicate MESSAGE_CREATE events
-    import time as _time
-    now = _time.monotonic()
+    now = monotime.monotonic()
     dedup_key = (str(msg.author.id), msg.content.strip())
     last_seen = _recent_commands.get(dedup_key)
     if last_seen and (now - last_seen) < COMMAND_DEDUP_WINDOW:
@@ -763,9 +762,9 @@ async def on_message(msg: discord.Message):
                  msg.author.display_name, COMMAND_DEDUP_WINDOW)
         return
     _recent_commands[dedup_key] = now
-    # Clean old entries
-    _recent_commands.update({k: v for k, v in _recent_commands.items() 
-                            if now - v < COMMAND_DEDUP_WINDOW * 2})
+    # Clean old entries periodically
+    for k in [k for k, v in _recent_commands.items() if now - v > COMMAND_DEDUP_WINDOW * 2]:
+        del _recent_commands[k]
     
     # Check for monthly reset when processing messages
     store.check_reset()
