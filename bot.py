@@ -723,7 +723,18 @@ async def on_ready():
 
 @bot.event
 async def on_command_error(ctx, error):
-    log.info("CMD ERROR in %s: %s", ctx.command, error)
+    if isinstance(error, commands.CommandOnCooldown):
+        days  = int(error.retry_after // 86400)
+        hours = int((error.retry_after % 86400) // 3600)
+        mins  = int((error.retry_after % 3600) // 60)
+        parts = []
+        if days:  parts.append(f"{days}d")
+        if hours: parts.append(f"{hours}h")
+        if mins:  parts.append(f"{mins}m")
+        time_str = " ".join(parts) or "less than a minute"
+        await ctx.send(f"⏳ This command is on cooldown. Try again in **{time_str}**.")
+    else:
+        log.info("CMD ERROR in %s: %s", ctx.command, error)
 
 
 @bot.event
@@ -1139,15 +1150,16 @@ async def cmd_crowns(ctx, *, args: str = "all"):
 
 
 @bot.command(name="reset")
-@commands.has_permissions(manage_guild=True)
-@commands.cooldown(1, 604800, commands.BucketType.guild)  # Once per week per guild (604800 seconds = 7 days)
+@commands.cooldown(1, 604800, commands.BucketType.guild)  # Once per week per guild
 async def cmd_reset(ctx, confirm: str = ""):
-    """Manually reset the leaderboard (requires 'manage_guild' permission, 1 week cooldown)"""
+    """Manually reset the leaderboard (1 week cooldown)"""
     if confirm.lower() != "confirm":
+        # Reset the cooldown so it only counts on actual resets, not warning messages
+        ctx.command.reset_cooldown(ctx)
         await ctx.send(
             "⚠️ **Warning**: This will delete ALL leaderboard data for this server.\n"
-            "To confirm, type: `!zgb reset confirm`\n\n"
-            "*Requires 'Manage Server' permission. 1 week cooldown.*"
+            f"To confirm, type: `{PREFIX}reset confirm`\n\n"
+            "*1 week cooldown after confirming.*"
         )
         return
     
