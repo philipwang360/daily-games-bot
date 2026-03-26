@@ -747,7 +747,7 @@ async def on_message(msg: discord.Message):
     # Check for monthly reset when processing messages
     store.check_reset()
     
-    log.info("MSG from %s: %s", msg.author.display_name, msg.content[:80])
+    log.info("MSG from %s (id=%s): %s", msg.author.display_name, msg.id, msg.content[:80])
     results = parse_message(msg.content)
     if results:
         d    = msg.created_at.strftime("%Y-%m-%d")
