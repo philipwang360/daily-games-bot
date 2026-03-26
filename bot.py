@@ -704,8 +704,10 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 # Store for configured channels (in-memory only now)
 config_store: dict[str, Optional[int]] = {}  # guild_id -> channel_id
 
-# Dedup set to prevent processing the same message twice
-_processed_message_ids: set[int] = set()
+# Dedup: prevent processing duplicate commands within a short window
+# Key: (user_id, content_hash), Value: timestamp
+_recent_commands: dict[tuple, float] = {}
+COMMAND_DEDUP_WINDOW = 5.0  # seconds
 
 # Flag to prevent commands from firing during history sync
 _syncing: bool = False
@@ -750,14 +752,20 @@ async def on_message(msg: discord.Message):
     if msg.author.bot or not msg.guild:
         return
     
-    # Deduplicate - ignore if we've already processed this message
-    if msg.id in _processed_message_ids:
-        log.info("DEDUP: skipping already-processed message id=%s", msg.id)
+    # Deduplicate commands within a short time window
+    # Discord sometimes delivers duplicate MESSAGE_CREATE events
+    import time as _time
+    now = _time.monotonic()
+    dedup_key = (str(msg.author.id), msg.content.strip())
+    last_seen = _recent_commands.get(dedup_key)
+    if last_seen and (now - last_seen) < COMMAND_DEDUP_WINDOW:
+        log.info("DEDUP: skipping duplicate from %s within %.1fs window", 
+                 msg.author.display_name, COMMAND_DEDUP_WINDOW)
         return
-    _processed_message_ids.add(msg.id)
-    # Keep set from growing forever - trim if too large
-    if len(_processed_message_ids) > 10000:
-        _processed_message_ids.clear()
+    _recent_commands[dedup_key] = now
+    # Clean old entries
+    _recent_commands.update({k: v for k, v in _recent_commands.items() 
+                            if now - v < COMMAND_DEDUP_WINDOW * 2})
     
     # Check for monthly reset when processing messages
     store.check_reset()
