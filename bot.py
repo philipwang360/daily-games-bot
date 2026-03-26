@@ -507,9 +507,9 @@ def _compute_crowns(rows, guild_id: str = ""):
         
         # Skip results before crown reset date
         if crown_reset_date:
-            result_date = datetime.strptime(r["puzzle_date"], "%Y-%m-%d")
-            result_date = result_date.replace(tzinfo=timezone.utc)
-            if result_date < crown_reset_date.date():
+            result_date = datetime.strptime(r["puzzle_date"], "%Y-%m-%d").date()
+            reset_date = crown_reset_date.date() if hasattr(crown_reset_date, 'date') else crown_reset_date
+            if result_date < reset_date:
                 continue
             
         by_gd[(r["game"], r["puzzle_date"])].append(r)
