@@ -58,7 +58,8 @@ class ResultsStore:
         return False
     
     def save(self, guild_id: str, user_id: str, username: str, 
-             game_result, date_str: str):
+             game_result, date_str: str, message_id: int = None, 
+             channel_id: int = None):
         """Save a result, overwriting any existing entry for same user/game/date"""
         key = (guild_id, user_id, game_result.game, date_str)
         self.results[key] = {
@@ -70,7 +71,9 @@ class ResultsStore:
             "max_score": game_result.max_score,
             "display": game_result.display,
             "puzzle_date": date_str,
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "message_id": message_id,
+            "channel_id": channel_id
         }
     
     def fetch(self, guild_id: str, *, date=None, start=None, end=None, 
@@ -404,6 +407,133 @@ def _compute_crowns(rows):
     return user_crowns, daily_winners
 
 
+def _get_game_scores_for_date(guild_id: str, game: str, date: str):
+    """Get all scores for a specific game on a specific date in a guild"""
+    rows = []
+    for key, r in store.results.items():
+        if r["guild_id"] != guild_id:
+            continue
+        if r["game"] != game:
+            continue
+        if r["puzzle_date"] != date:
+            continue
+        rows.append(r)
+    return rows
+
+
+def _is_lower_is_better(game_name: str) -> bool:
+    """Check if a game uses lower-is-better scoring"""
+    meta = _GAME_META.get(game_name.lower(), {})
+    return meta.get("low", False)
+
+
+def _find_current_winners_and_best(scores: list, game: str):
+    """Find the current best score and winners for a game"""
+    if not scores:
+        return None, set()
+    
+    low = _is_lower_is_better(game)
+    score_values = [r["score"] for r in scores]
+    best = min(score_values) if low else max(score_values)
+    
+    winners = set()
+    for r in scores:
+        if r["score"] == best:
+            winners.add(r["user_id"])
+    
+    return best, winners
+
+
+async def _remove_reaction_from_message(channel, message_id: int, emoji: str):
+    """Remove a specific reaction from a message"""
+    if not message_id:
+        return
+    try:
+        msg = await channel.fetch_message(message_id)
+        await msg.remove_reaction(emoji, bot.user)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        # Message deleted, no permissions, or rate limited - ignore silently
+        pass
+
+
+def _find_current_worst(scores: list, game: str):
+    """Find the current worst score and holder(s) for a game"""
+    if not scores:
+        return None, set()
+    
+    low = _is_lower_is_better(game)
+    score_values = [r["score"] for r in scores]
+    worst = max(score_values) if low else min(score_values)
+    
+    losers = set()
+    for r in scores:
+        if r["score"] == worst:
+            losers.add(r["user_id"])
+    
+    return worst, losers
+
+
+async def _manage_crown_reactions(channel, game: str, date: str, 
+                                  new_user_id: str, new_message_id: int,
+                                  new_score, is_edit: bool = False):
+    """
+    Manage crown and kelvDank reactions for a new score submission.
+    Returns the emoji(s) to add to the new message.
+    """
+    # Skip if game doesn't award crowns
+    normalized_name = _normalize_game_name(game)
+    if normalized_name in NO_CROWN_GAMES:
+        return "📊"
+    
+    guild_id = str(channel.guild.id)
+    
+    # Get all scores for this game/date (including the new one we just saved)
+    all_scores = _get_game_scores_for_date(guild_id, game, date)
+    
+    if len(all_scores) == 1:
+        # First score of the day - they could be best OR worst, we don't know!
+        # Give them both reactions to keep them humble
+        return ["👑", "kelvDank"]
+    
+    # Find current best and worst
+    best_score, current_winners = _find_current_winners_and_best(all_scores, game)
+    worst_score, current_losers = _find_current_worst(all_scores, game)
+    
+    low = _is_lower_is_better(game)
+    reactions_to_add = []
+    
+    # Handle crown logic
+    if new_score == best_score:
+        # Tie for best - get crown
+        reactions_to_add.append("👑")
+    elif (new_score < best_score) if low else (new_score > best_score):
+        # New best! Remove crown from previous winner(s)
+        for winner_id in current_winners:
+            if winner_id != new_user_id:
+                for r in all_scores:
+                    if r["user_id"] == winner_id and r.get("message_id"):
+                        await _remove_reaction_from_message(channel, r["message_id"], "👑")
+                        break
+        reactions_to_add.append("👑")
+    
+    # Handle kelvDank logic (only if not also getting crown)
+    if "👑" not in reactions_to_add:
+        if new_score == worst_score:
+            # New worst! Remove kelvDank from previous loser(s)
+            for loser_id in current_losers:
+                if loser_id != new_user_id:
+                    for r in all_scores:
+                        if r["user_id"] == loser_id and r.get("message_id"):
+                            await _remove_reaction_from_message(channel, r["message_id"], "kelvDank")
+                            break
+            reactions_to_add.append("kelvDank")
+        else:
+            # Just a regular score
+            reactions_to_add.append("📊")
+    
+    return reactions_to_add[0] if len(reactions_to_add) == 1 else reactions_to_add
+
+
 def _rank_items(items, *, key, reverse=False):
     ordered = sorted(items, key=key, reverse=reverse)
     out, prev_val, prev_rank = [], None, 0
@@ -621,10 +751,27 @@ async def on_message(msg: discord.Message):
         gid  = str(msg.guild.id)
         uid  = str(msg.author.id)
         name = msg.author.display_name
+        
         for r in results:
-            store.save(gid, uid, name, r, d)
+            # Save with message info for crown tracking
+            store.save(gid, uid, name, r, d, msg.id, msg.channel.id)
             log.info("  📊  %s  ·  %s %s", name, r.game, r.display)
-        await msg.add_reaction("📊")
+            
+            # Manage crown reactions
+            reaction = await _manage_crown_reactions(
+                msg.channel, r.game, d, uid, msg.id, r.score
+            )
+            
+            # Add the appropriate reaction(s)
+            if reaction:
+                reactions_to_add = reaction if isinstance(reaction, list) else [reaction]
+                for emoji in reactions_to_add:
+                    try:
+                        await msg.add_reaction(emoji)
+                    except discord.HTTPException:
+                        # If custom emoji fails, fall back to 📊
+                        if emoji == "kelvDank":
+                            await msg.add_reaction("📊")
     
     try:
         await bot.process_commands(msg)
@@ -646,8 +793,75 @@ async def on_message_edit(_before, after: discord.Message):
         gid  = str(after.guild.id)
         uid  = str(after.author.id)
         name = after.author.display_name
+        
         for r in results:
-            store.save(gid, uid, name, r, d)
+            # Get the old score before overwriting (for comparison)
+            old_key = (gid, uid, r.game, d)
+            old_result = store.results.get(old_key)
+            old_score = old_result["score"] if old_result else None
+            
+            # Save the new score with message info
+            store.save(gid, uid, name, r, d, after.id, after.channel.id)
+            
+            # Only manage crowns if this is a crown-eligible game
+            normalized_name = _normalize_game_name(r.game)
+            if normalized_name not in NO_CROWN_GAMES:
+                # Get current state before this edit
+                if old_score is not None:
+                    all_scores = _get_game_scores_for_date(gid, r.game, d)
+                    # Temporarily exclude the new score to see previous state
+                    other_scores = [s for s in all_scores if s["user_id"] != uid]
+                    
+                    if other_scores:
+                        prev_best, prev_winners = _find_current_winners_and_best(other_scores, r.game)
+                    else:
+                        prev_best, prev_winners = None, set()
+                    
+                    # Check if score improved and now beats the previous best
+                    low = _is_lower_is_better(r.game)
+                    
+                    if prev_best is not None:
+                        improved = (r.score < old_score) if low else (r.score > old_score)
+                        beats_prev_best = (r.score < prev_best) if low else (r.score > prev_best)
+                        
+                        if improved and beats_prev_best:
+                            # User improved and now beats the old best - transfer crowns
+                            for winner_id in prev_winners:
+                                for s in other_scores:
+                                    if s["user_id"] == winner_id and s.get("message_id"):
+                                        await _remove_reaction_from_message(after.channel, s["message_id"], "👑")
+                                        break
+                            
+                            # Add crown to this message
+                            try:
+                                await after.add_reaction("👑")
+                            except discord.HTTPException:
+                                pass
+                        elif improved and r.score == prev_best:
+                            # User improved to tie the best - add crown (keep existing)
+                            try:
+                                await after.add_reaction("👑")
+                            except discord.HTTPException:
+                                pass
+                    else:
+                        # No previous competitors - check if this is now the best
+                        is_best = (r.score < old_score) if low else (r.score > old_score)
+                        if is_best:
+                            try:
+                                await after.add_reaction("👑")
+                            except discord.HTTPException:
+                                pass
+                else:
+                    # New entry (not an edit of existing score)
+                    # Just run normal crown management
+                    reaction = await _manage_crown_reactions(
+                        after.channel, r.game, d, uid, after.id, r.score, is_edit=True
+                    )
+                    if reaction and reaction != "kelvDank":
+                        try:
+                            await after.add_reaction(reaction)
+                        except discord.HTTPException:
+                            pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -673,7 +887,7 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
                 name = msg.author.display_name
                 
                 for r in results:
-                    store.save(gid, uid, name, r, date_str)
+                    store.save(gid, uid, name, r, date_str, msg.id, channel.id)
                     result_count += 1
             message_count += 1
     except discord.HTTPException as e:
