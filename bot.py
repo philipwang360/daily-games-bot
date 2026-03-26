@@ -940,10 +940,6 @@ async def cmd_links(ctx):
 
 @bot.command(name="lb", aliases=["leaderboard"])
 async def cmd_lb(ctx, *, args: str = "today"):
-    import traceback
-    log.info("cmd_lb called by %s with args=%r msg_id=%s\n%s", 
-             ctx.author.display_name, args, ctx.message.id,
-             "".join(traceback.format_stack()))
     gid   = str(ctx.guild.id)
     today = datetime.now(timezone.utc).date()
 
