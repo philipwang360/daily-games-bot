@@ -131,42 +131,36 @@ def _get_similarity_score(s1: str, s2: str) -> float:
 
 
 async def _delete_duplicate_messages(channel: discord.TextChannel, keep_message_id: int, content_preview: str):
-    """Delete all similar bot messages except the one with keep_message_id"""
-    content_hash = _get_content_hash(content_preview)
+    """Delete all similar bot messages except the one with keep_message_id. Keep only the most recent."""
     deleted = 0
     
     try:
-        # Look at recent messages (last 10 messages in last 5 minutes)
-        async for msg in channel.history(limit=10, oldest_first=False):
-            # Skip if older than 5 minutes
-            if (datetime.now(timezone.utc) - msg.created_at).seconds > 300:
+        # Collect all bot messages in the last 30 seconds
+        bot_messages = []
+        async for msg in channel.history(limit=20, oldest_first=False):
+            # Skip if older than 30 seconds
+            if (datetime.now(timezone.utc) - msg.created_at).seconds > 30:
                 break
             
-            # Skip the message we want to keep
-            if msg.id == keep_message_id:
-                continue
-            
-            # Only delete bot's own messages
+            # Only consider bot messages
             if not msg.author.bot:
                 continue
             
-            # Check if content matches
-            msg_content = ""
-            if msg.embeds:
-                msg_content = msg.embeds[0].title if msg.embeds[0].title else ""
-            else:
-                msg_content = msg.content
+            bot_messages.append(msg)
+        
+        # Keep only the most recent bot message (should be the one we just sent)
+        # Delete all others
+        for msg in bot_messages:
+            if msg.id == keep_message_id:
+                continue  # Don't delete the one we want to keep
             
-            msg_hash = _get_content_hash(msg_content)
-            
-            # Check for similarity
-            if content_hash in msg_hash or msg_hash in content_hash or _get_similarity_score(content_hash, msg_hash) > 0.8:
-                try:
-                    await msg.delete()
-                    deleted += 1
-                    log.info(f"Deleted duplicate message {msg.id}")
-                except discord.HTTPException as e:
-                    log.error(f"Failed to delete duplicate {msg.id}: {e}")
+            try:
+                await msg.delete()
+                deleted += 1
+                log.info(f"Deleted duplicate message {msg.id}")
+            except discord.HTTPException as e:
+                log.error(f"Failed to delete duplicate {msg.id}: {e}")
+                
     except discord.HTTPException as e:
         log.error(f"Error in cleanup: {e}")
     
