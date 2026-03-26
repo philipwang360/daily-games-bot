@@ -130,36 +130,53 @@ def _get_similarity_score(s1: str, s2: str) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
-async def _delete_duplicate_messages(channel: discord.TextChannel, keep_message_id: int, content_preview: str):
+async def _delete_duplicate_messages(channel: discord.TextChannel, content_preview: str):
     """Delete all similar bot messages except the one with keep_message_id. Keep only the most recent."""
     deleted = 0
     
     try:
-        # Collect all bot messages in the last 30 seconds
+        # Wait a moment to ensure the message we just sent is in history
+        await asyncio.sleep(0.5)
+        
+        # Collect all bot messages in the last 60 seconds
         bot_messages = []
         async for msg in channel.history(limit=20, oldest_first=False):
-            # Skip if older than 30 seconds
-            if (datetime.now(timezone.utc) - msg.created_at).seconds > 30:
+            # Skip if older than 60 seconds
+            age = (datetime.now(timezone.utc) - msg.created_at).total_seconds()
+            if age > 60:
                 break
             
             # Only consider bot messages
             if not msg.author.bot:
                 continue
             
-            bot_messages.append(msg)
+            # Only consider embeds (our messages have embeds)
+            if not msg.embeds:
+                continue
+            
+            bot_messages.append((msg, msg.created_at, msg.id))
         
-        # Keep only the most recent bot message (should be the one we just sent)
-        # Delete all others
-        for msg in bot_messages:
-            if msg.id == keep_message_id:
-                continue  # Don't delete the one we want to keep
+        if not bot_messages:
+            return
+        
+        # Find the most recent message
+        most_recent = max(bot_messages, key=lambda x: x[1])
+        most_recent_id = most_recent[2]
+        
+        log.info(f"Most recent bot message ID: {most_recent_id}")
+        
+        # Delete all bot messages except the most recent one
+        for msg, created_at, msg_id in bot_messages:
+            if msg_id == most_recent_id:
+                log.info(f"Keeping most recent message {msg_id}")
+                continue
             
             try:
                 await msg.delete()
                 deleted += 1
-                log.info(f"Deleted duplicate message {msg.id}")
+                log.info(f"Deleted duplicate message {msg_id}")
             except discord.HTTPException as e:
-                log.error(f"Failed to delete duplicate {msg.id}: {e}")
+                log.error(f"Failed to delete duplicate {msg_id}: {e}")
                 
     except discord.HTTPException as e:
         log.error(f"Error in cleanup: {e}")
@@ -175,7 +192,7 @@ async def send_with_cleanup(ctx, embed, content_preview: str = ""):
     # Wait 2 seconds for any duplicates to appear, then clean them up
     await asyncio.sleep(2)
     preview = content_preview if content_preview else (embed.title if embed.title else "")
-    await _delete_duplicate_messages(ctx.channel, msg.id, preview)
+    await _delete_duplicate_messages(ctx.channel, preview)
     
     return msg
 
@@ -1130,7 +1147,7 @@ async def daily_summary():
         
         # Wait 2 seconds for any duplicates to appear, then clean them up
         await asyncio.sleep(2)
-        await _delete_duplicate_messages(ch, msg.id, f"Daily Leaderboard — {today.strftime('%b %d')}")
+        await _delete_duplicate_messages(ch, f"Daily Leaderboard — {today.strftime('%b %d')}")
 
 
 @tasks.loop(time=dt_time(hour=0, minute=5, tzinfo=ZoneInfo("America/New_York")))
@@ -1189,7 +1206,7 @@ async def daily_links():
         
         # Wait 2 seconds for any duplicates to appear, then clean them up
         await asyncio.sleep(2)
-        await _delete_duplicate_messages(ch, msg.id, f"Daily Games Links — {today.strftime('%b %d')}")
+        await _delete_duplicate_messages(ch, f"Daily Games Links — {today.strftime('%b %d')}")
 
 
 # ═══════════════════════════════════════════════════════════════════
