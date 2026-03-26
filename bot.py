@@ -801,10 +801,7 @@ async def on_message(msg: discord.Message):
                         # Catch any other errors to prevent breaking the loop
                         log.info("Error adding %s reaction: %s", emoji, e)
     
-    try:
-        await bot.process_commands(msg)
-    except Exception as e:
-        log.info("COMMAND ERROR: %s", e)
+    await bot.process_commands(msg)
 
 
 @bot.event
