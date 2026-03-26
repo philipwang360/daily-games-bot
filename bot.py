@@ -4,7 +4,7 @@ Zaily Games Leaderboard Bot for Discord — Message History Edition
 Monthly reset to prevent backlog accumulation
 """
 
-import re, os, logging, asyncio
+import re, os, logging, asyncio, unicodedata
 from datetime import datetime, timedelta, timezone, time as dt_time
 from collections import defaultdict
 from typing import Optional
@@ -24,7 +24,7 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════
 
 TOKEN      = os.getenv("DAILY_GAMES_BOT_TOKEN")
-PREFIX     = os.getenv("BOT_PREFIX", "!zgb ")
+PREFIX     = "!zg "  # Hardcoded prefix (was os.getenv("BOT_PREFIX", "!zgb "))
 RESET_DAY  = int(os.getenv("RESET_DAY", "1"))  # Day of month to reset (default: 1st)
 
 log = logging.getLogger("zailygames")
@@ -248,6 +248,57 @@ def _timeguessr(m):
     return s, mx, f"{s:,}/{mx:,}"
 
 
+@game_parser("Framed", r"Framed\s*#(\d+)\s*\n([🎥🟥🟩⬛\s]+)",
+             lower_is_better=True, icon="🎬")
+def _framed(m):
+    line = m.group(2).strip()
+    # Count squares - green is good (low score), red/black are misses
+    green = line.count("🟩")
+    red = line.count("🟥")
+    black = line.count("⬛")
+    # Score = number of attempts to get green (1-6), or 7 if failed
+    if green == 0:
+        score = 7
+    else:
+        # Find position of first green
+        squares = [c for c in line if c in ["🟥", "🟩", "⬛"]]
+        try:
+            score = squares.index("🟩") + 1
+        except ValueError:
+            score = 7
+    return score, 6, f"{score}/6"
+
+
+@game_parser("Costcodle", r"Costcodle\s*#\d+\s+(\d)/6",
+             lower_is_better=True, icon="🛒")
+def _costcodle(m):
+    s = int(m.group(1))
+    return s, 6, f"{s}/6"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  GAME LINKS
+# ═══════════════════════════════════════════════════════════════════
+
+GAME_LINKS = {
+    "Wordle": "https://www.nytimes.com/games/wordle/index.html",
+    "Pokédle": "https://pokedle.net/",
+    "LoLdle": "https://loldle.net/",
+    "Narutodle": "https://narutodle.com/",
+    "WhenTaken": "https://whentaken.com/",
+    "Dialed": "https://dialed.wtf/",
+    "Catfishing": "https://catfishing.net/",
+    "Feudle": "https://feudlegame.com/",
+    "Doctordle": "https://doctordle.com/",
+    "TimeGuessr": "https://timeguessr.com/",
+    "Framed": "https://framed.wtf/",
+    "Costcodle": "https://costcodle.com/"
+}
+
+# Games to exclude from crown calculations (still tracked, just not crowned)
+NO_CROWN_GAMES = {"doctordle", "loldle", "narutodle", "pokedle", "whentaken"}
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  MESSAGE HISTORY FETCHING
 # ═══════════════════════════════════════════════════════════════════
@@ -319,9 +370,20 @@ def deduplicate_results(results: list[dict]) -> list[dict]:
 #  SCORING HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
+def _normalize_game_name(name: str) -> str:
+    """Normalize game name by removing accents and lowercasing"""
+    # Normalize to NFKD form and remove combining characters
+    normalized = unicodedata.normalize('NFKD', name)
+    return ''.join(c for c in normalized if not unicodedata.combining(c)).lower()
+
+
 def _compute_crowns(rows):
     by_gd: dict[tuple, list] = defaultdict(list)
     for r in rows:
+        # Skip games that shouldn't count toward crowns
+        normalized_name = _normalize_game_name(r["game"])
+        if normalized_name in NO_CROWN_GAMES:
+            continue
         by_gd[(r["game"], r["puzzle_date"])].append(r)
 
     user_crowns:   dict[tuple, int]       = defaultdict(int)
@@ -394,7 +456,14 @@ def _build_daily_embed(title, rows):
             crown = " 👑" if r["score"] == best_score and len(gr) > 1 else ""
             lines.append(f"{medal} **{r['username']}** — {r['display']}{crown}")
 
-        embed.add_field(name=f"{icon}  {game_name}",
+        # Add game name with icon as field name
+        field_name = f"{icon}  {game_name}"
+        if low:
+            field_name += " (lower is better)"
+        else:
+            field_name += " (higher is better)"
+            
+        embed.add_field(name=field_name,
                         value="\n".join(lines), inline=False)
     return embed
 
@@ -454,7 +523,14 @@ def _build_period_embed(title, rows, *, show_detail=False):
                         f"{lbl}: {r['display']}{' 👑' if won else ''}")
                 lines.append(f"╰ {' · '.join(day_parts)}")
 
-        embed.add_field(name=f"{icon}  {game_name}",
+        # Add game name with icon and scoring info
+        field_name = f"{icon}  {game_name}"
+        if low:
+            field_name += " (lower is better)"
+        else:
+            field_name += " (higher is better)"
+            
+        embed.add_field(name=field_name,
                         value="\n".join(lines) or "—", inline=False)
     return embed
 
@@ -517,6 +593,8 @@ async def on_ready():
         daily_summary.start()
     if not monthly_reset_check.is_running():
         monthly_reset_check.start()
+    if not daily_links.is_running():
+        daily_links.start()
     
     cmds = [c.name for c in bot.commands]
     log.info("✅  %s online  ·  tracking %d games  ·  prefix: '%s'  ·  commands: %s", 
@@ -573,10 +651,70 @@ async def on_message_edit(_before, after: discord.Message):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  HISTORY SYNC HELPERS
+# ═══════════════════════════════════════════════════════════════════
+
+async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
+    """Fetch message history and populate the store"""
+    after = datetime.now(timezone.utc) - timedelta(days=days)
+    message_count = 0
+    result_count = 0
+    
+    try:
+        async for msg in channel.history(limit=1000, after=after, oldest_first=False):
+            if msg.author.bot:
+                continue
+            
+            results = parse_message(msg.content)
+            if results:
+                date_str = msg.created_at.strftime("%Y-%m-%d")
+                gid = str(channel.guild.id)
+                uid = str(msg.author.id)
+                name = msg.author.display_name
+                
+                for r in results:
+                    store.save(gid, uid, name, r, date_str)
+                    result_count += 1
+            message_count += 1
+    except discord.HTTPException as e:
+        log.error("Error fetching history: %s", e)
+    
+    log.info(f"Synced {message_count} messages, found {result_count} game results from last {days} days")
+    return result_count
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  COMMANDS
 # ═══════════════════════════════════════════════════════════════════
 
 PERIODS = {"today", "yesterday", "yday", "week", "month", "all"}
+
+
+@bot.command(name="sync")
+async def cmd_sync(ctx, days: int = 30):
+    """Manually sync message history to populate the store"""
+    await ctx.send(f"🔄 Syncing last {days} days of message history...")
+    count = await sync_history_to_store(ctx.channel, days)
+    await ctx.send(f"✅ Found {count} game results!")
+
+
+@bot.command(name="links")
+async def cmd_links(ctx):
+    """Show all game links"""
+    lines = []
+    for game_name, url in sorted(GAME_LINKS.items()):
+        meta = _GAME_META.get(game_name.lower(), {})
+        icon = meta.get('icon', '🎮')
+        lines.append(f"{icon} [{game_name}]({url})")
+    
+    embed = discord.Embed(
+        title="🎮  Daily Games Links",
+        description="\n".join(lines),
+        color=0x5865F2,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text=f"Posted at 8:00 AM ET · {RESET_DAY}th of each month for new leaderboard")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="lb", aliases=["leaderboard"])
@@ -625,8 +763,15 @@ async def cmd_lb(ctx, *, args: str = "today"):
         meta = _GAME_META.get(game_name.lower(), {})
         title += f"  ·  {meta.get('icon','🎮')} {game_name}"
 
-    # Fetch from in-memory store
+    # First try in-memory store
     rows = store.fetch(gid, **kw)
+    
+    # If no results, sync from message history
+    if not rows and isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("🔄 Fetching message history...", delete_after=3)
+        days_to_sync = 1 if single_day else (7 if period == "week" else 30)
+        await sync_history_to_store(ctx.channel, days=days_to_sync)
+        rows = store.fetch(gid, **kw)
 
     if single_day:
         embed = _build_daily_embed(title, rows)
@@ -662,6 +807,13 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     
     # Fetch from in-memory store
     rows = store.fetch(gid, uid=uid)
+    
+    # If no results, sync from history first
+    if not rows and isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("🔄 Fetching your history...", delete_after=3)
+        await sync_history_to_store(ctx.channel, days=30)
+        rows = store.fetch(gid, uid=uid)
+    
     if not rows:
         return await ctx.send(
             f"No results for **{target.display_name}** yet.")
@@ -698,8 +850,12 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
 
         avg_s   = _fmt_avg(avg, mx)
         crown_s = f" · 👑 {c}" if c else ""
+        
+        # Add scoring direction hint
+        direction = "lower=better" if low else "higher=better"
+        
         e.add_field(
-            name=f"{icon}  {gn}",
+            name=f"{icon}  {gn}  ({direction})",
             value=(f"Avg **{avg_s}** · Best **{best_d}** · "
                    f"{len(gr)} plays{crown_s}"),
             inline=False)
@@ -746,6 +902,14 @@ async def cmd_crowns(ctx, *, args: str = "all"):
 
     # Fetch from in-memory store
     rows = store.fetch(gid, **kw)
+    
+    # If no results, sync from history first
+    if not rows and isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("🔄 Fetching leaderboard history...", delete_after=3)
+        days_to_sync = 1 if period == "today" else (7 if period == "week" else 30)
+        await sync_history_to_store(ctx.channel, days=days_to_sync)
+        rows = store.fetch(gid, **kw)
+    
     crowns_map, _ = _compute_crowns(rows)
 
     names: dict[str, str] = {}
@@ -777,16 +941,46 @@ async def cmd_crowns(ctx, *, args: str = "all"):
 
     lines = []
     for _rank, medal, (uid, data) in ranked[:15]:
-        breakdown = " · ".join(
-            f"{_GAME_META.get(g.lower(),{}).get('icon','🎮')}{c}"
-            for g, c in sorted(data["by_game"].items(),
-                               key=lambda x: x[1], reverse=True))
+        # Build breakdown with game names
+        game_parts = []
+        for g, c in sorted(data["by_game"].items(), key=lambda x: x[1], reverse=True):
+            meta = _GAME_META.get(g.lower(), {})
+            icon = meta.get('icon', '🎮')
+            game_parts.append(f"{icon} {g}: {c}")
+        breakdown = " · ".join(game_parts)
         lines.append(
             f"{medal} **{data['name']}** — **{data['total']}** crowns\n"
             f"╰ {breakdown}")
 
     e.description = "\n".join(lines)
     await ctx.send(embed=e)
+
+
+@bot.command(name="reset")
+@commands.has_permissions(manage_guild=True)
+@commands.cooldown(1, 604800, commands.BucketType.guild)  # Once per week per guild (604800 seconds = 7 days)
+async def cmd_reset(ctx, confirm: str = ""):
+    """Manually reset the leaderboard (requires 'manage_guild' permission, 1 week cooldown)"""
+    if confirm.lower() != "confirm":
+        await ctx.send(
+            "⚠️ **Warning**: This will delete ALL leaderboard data for this server.\n"
+            "To confirm, type: `!zg reset confirm`\n\n"
+            "*Requires 'Manage Server' permission. 1 week cooldown.*"
+        )
+        return
+    
+    gid = str(ctx.guild.id)
+    
+    # Count how many entries we're deleting
+    count = len([r for r in store.results.values() if r["guild_id"] == gid])
+    
+    # Delete all results for this guild
+    keys_to_delete = [k for k, r in store.results.items() if r["guild_id"] == gid]
+    for k in keys_to_delete:
+        del store.results[k]
+    
+    log.info(f"🗑️  Manual reset by {ctx.author.name}: cleared {count} results for guild {gid}")
+    await ctx.send(f"🗑️ **Leaderboard Reset**: Cleared {count} entries. Fresh start!")
 
 
 @bot.command(name="setchannel")
@@ -819,10 +1013,12 @@ async def cmd_help(ctx):
         f"`{PREFIX}crowns` — crown leaderboard\n"
         f"`{PREFIX}crowns week` / `{PREFIX}crowns wordle`\n"
         f"`{PREFIX}mystats` / `{PREFIX}stats @user`"))
-    e.add_field(name="⚙️  Setup", inline=False, value=(
+    e.add_field(name="⚙️  Setup & Admin", inline=False, value=(
         f"`{PREFIX}games` — list supported games\n"
+        f"`{PREFIX}links` — show all game links\n"
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
-        f"`{PREFIX}setchannel` — disable auto-post\n\n"
+        f"`{PREFIX}setchannel` — disable auto-post\n"
+        f"`{PREFIX}reset confirm` — ⚠️ clear all data (admin only, 1 week cooldown)\n\n"
         f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
     e.set_footer(text="Add new games → edit GAME PARSERS in bot.py")
     await ctx.send(embed=e)
@@ -880,6 +1076,40 @@ async def monthly_reset_check():
                         await ch.send("🗑️ **Monthly Reset**: Leaderboard data has been cleared for the new month!")
                     except:
                         pass
+
+
+@tasks.loop(time=dt_time(hour=8, minute=0, tzinfo=ZoneInfo("America/New_York")))
+async def daily_links():
+    """Post daily game links at 8AM ET"""
+    for guild in bot.guilds:
+        gid = str(guild.id)
+        channel_id = config_store.get(gid)
+        
+        if not channel_id:
+            continue
+            
+        ch = bot.get_channel(channel_id)
+        if not ch:
+            continue
+        
+        # Build links embed
+        lines = []
+        for game_name, url in sorted(GAME_LINKS.items()):
+            meta = _GAME_META.get(game_name.lower(), {})
+            icon = meta.get('icon', '🎮')
+            lines.append(f"{icon} [{game_name}]({url})")
+        
+        embed = discord.Embed(
+            title="🎮  Daily Games Links",
+            description="\n".join(lines),
+            color=0x57F287,
+            timestamp=datetime.now(timezone.utc)
+        )
+        today = datetime.now(ZoneInfo("America/New_York"))
+        embed.set_footer(text=f"{today.strftime('%A, %B %d')} · Good luck!")
+        
+        await ch.send(embed=embed)
+        log.info("Links sent → %s", guild.name)
 
 
 # ═══════════════════════════════════════════════════════════════════
