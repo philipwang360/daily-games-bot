@@ -551,10 +551,16 @@ def _build_daily_embed(title, rows):
         ranked = _rank_items(gr, key=lambda r: r["score"],
                              reverse=(not low))
         best_score = ranked[0][2]["score"] if ranked else None
+        best_max_score = ranked[0][2]["max_score"] if ranked else None
+        
+        # Check if best score is a failed attempt (score > max_score)
+        # If so, no one gets crowns for this game today
+        all_failed = best_score > best_max_score if best_score and best_max_score else False
 
         lines = []
         for _rank, medal, r in ranked:
-            crown = " 👑" if r["score"] == best_score and len(gr) > 1 else ""
+            # Only show crown if: not all failed, score is best, and multiple players
+            crown = " 👑" if (r["score"] == best_score and len(gr) > 1 and not all_failed) else ""
             lines.append(f"{medal} **{r['username']}** — {r['display']}{crown}")
 
         # Add game name with icon as field name
