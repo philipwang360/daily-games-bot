@@ -131,7 +131,14 @@ def _get_similarity_score(s1: str, s2: str) -> float:
 
 
 async def _delete_duplicate_messages(channel: discord.TextChannel, content_preview: str):
-    """Delete all similar bot messages except the one with keep_message_id. Keep only the most recent."""
+    """[DELETION DISABLED FOR TESTING] Delete all similar bot messages except the most recent."""
+    # NOTE: Deletion code temporarily disabled for testing multiple instances
+    # To restore deletion, uncomment the code below
+    
+    log.info("[TEST MODE] Duplicate deletion is currently disabled")
+    return  # Remove this line to restore deletion
+    
+    """
     deleted = 0
     
     try:
@@ -183,6 +190,7 @@ async def _delete_duplicate_messages(channel: discord.TextChannel, content_previ
     
     if deleted > 0:
         log.info(f"Cleaned up {deleted} duplicate messages in channel {channel.id}")
+    """
 
 
 async def send_with_cleanup(ctx, embed, content_preview: str = ""):
