@@ -108,6 +108,39 @@ class ResultsStore:
 # Global storage instance
 store = ResultsStore()
 
+# Track recently sent messages to prevent duplicates (bot messages only)
+_recent_messages: dict[tuple, list] = {}  # (channel_id, content_hash): [(message_id, timestamp)]
+
+
+def _get_content_hash(content: str) -> str:
+    """Generate a simple hash of message content for comparison"""
+    # Normalize by removing extra whitespace and lowercasing
+    normalized = ' '.join(content.lower().split())
+    return normalized[:200]  # First 200 chars should be enough
+
+
+async def _check_and_handle_duplicate(channel: discord.TextChannel, content: str) -> bool:
+    """Check if bot already sent this message recently. Returns True if duplicate detected (prevents sending new message)."""
+    content_hash = _get_content_hash(content)
+    key = (str(channel.id), content_hash)
+    
+    now = datetime.now(timezone.utc)
+    
+    # Clean old entries (older than 30 seconds)
+    if key in _recent_messages:
+        _recent_messages[key] = [
+            (msg_id, timestamp) for msg_id, timestamp in _recent_messages[key]
+            if (now - timestamp).seconds < 30
+        ]
+    
+    # Check for duplicates
+    if key in _recent_messages and len(_recent_messages[key]) > 0:
+        # This is a duplicate - don't send again!
+        log.warning(f"Duplicate message detected in channel {channel.id}, content: {content_hash[:50]}...")
+        return True
+    
+    return False
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  PARSER REGISTRY
@@ -1047,13 +1080,27 @@ async def daily_summary():
         if not rows:
             continue
             
+        # Check for duplicate message before sending
+        content_preview = f"Daily Leaderboard — {today.strftime('%b %d')}"
+        if await _check_and_handle_duplicate(ch, content_preview):
+            log.warning(f"Skipping duplicate daily summary for {guild.name}")
+            continue
+            
         embed = _build_daily_embed(
             f"📊  Daily Leaderboard — {today.strftime('%b %d')}", rows)
         
         all_rows = store.get_all(gid)
         _add_streaks(embed, all_rows)
         
-        await ch.send(embed=embed)
+        msg = await ch.send(embed=embed)
+        
+        # Track this message
+        content_hash = _get_content_hash(content_preview)
+        key = (str(ch.id), content_hash)
+        if key not in _recent_messages:
+            _recent_messages[key] = []
+        _recent_messages[key].append((msg.id, datetime.now(timezone.utc)))
+        
         log.info("Recap sent → %s", guild.name)
 
 
@@ -1089,6 +1136,15 @@ async def daily_links():
         if not ch:
             continue
         
+        # Get today's date first
+        today = datetime.now(ZoneInfo("America/New_York"))
+        
+        # Check for duplicate before sending
+        content_preview = f"Daily Games Links — {today.strftime('%b %d')}"
+        if await _check_and_handle_duplicate(ch, content_preview):
+            log.warning(f"Skipping duplicate links for {guild.name}")
+            continue
+        
         # Build links embed
         lines = []
         for game_name, url in sorted(GAME_LINKS.items()):
@@ -1102,10 +1158,17 @@ async def daily_links():
             color=0x57F287,
             timestamp=datetime.now(timezone.utc)
         )
-        today = datetime.now(ZoneInfo("America/New_York"))
         embed.set_footer(text=f"{today.strftime('%A, %B %d')} · Good luck!")
         
-        await ch.send(embed=embed)
+        msg = await ch.send(embed=embed)
+        
+        # Track this message
+        content_hash = _get_content_hash(content_preview)
+        key = (str(ch.id), content_hash)
+        if key not in _recent_messages:
+            _recent_messages[key] = []
+        _recent_messages[key].append((msg.id, datetime.now(timezone.utc)))
+        
         log.info("Links sent → %s", guild.name)
 
 
