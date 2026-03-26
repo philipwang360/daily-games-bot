@@ -752,24 +752,10 @@ async def on_message(msg: discord.Message):
     if msg.author.bot or not msg.guild:
         return
     
-    # Deduplicate commands within a short time window
-    # Discord sometimes delivers duplicate MESSAGE_CREATE events
-    now = monotime.monotonic()
-    dedup_key = (str(msg.author.id), msg.content.strip())
-    last_seen = _recent_commands.get(dedup_key)
-    if last_seen and (now - last_seen) < COMMAND_DEDUP_WINDOW:
-        log.info("DEDUP: skipping duplicate from %s within %.1fs window", 
-                 msg.author.display_name, COMMAND_DEDUP_WINDOW)
-        return
-    _recent_commands[dedup_key] = now
-    # Clean old entries periodically
-    for k in [k for k, v in _recent_commands.items() if now - v > COMMAND_DEDUP_WINDOW * 2]:
-        del _recent_commands[k]
-    
     # Check for monthly reset when processing messages
     store.check_reset()
     
-    log.info("MSG from %s (id=%s): %s", msg.author.display_name, msg.id, msg.content[:80])
+    log.info("MSG from %s (id=%s, guild=%s): %s", msg.author.display_name, msg.id, msg.guild.id, msg.content[:80])
     results = parse_message(msg.content)
     if results:
         d    = msg.created_at.strftime("%Y-%m-%d")
@@ -823,13 +809,10 @@ async def on_message(msg: discord.Message):
                         # Catch any other errors to prevent breaking the loop
                         log.info("Error adding %s reaction: %s", emoji, e)
     
-    # Don't process commands while syncing history - old command messages
-    # in history would otherwise re-trigger commands causing duplicate responses
-    if not _syncing:
-        try:
-            await bot.process_commands(msg)
-        except Exception as e:
-            log.info("COMMAND ERROR: %s", e)
+    try:
+        await bot.process_commands(msg)
+    except Exception as e:
+        log.info("COMMAND ERROR: %s", e)
 
 
 @bot.event
