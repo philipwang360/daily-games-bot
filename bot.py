@@ -801,7 +801,10 @@ async def on_message(msg: discord.Message):
                         # Catch any other errors to prevent breaking the loop
                         log.info("Error adding %s reaction: %s", emoji, e)
     
-    await bot.process_commands(msg)
+    try:
+        await bot.process_commands(msg)
+    except Exception as e:
+        log.info("COMMAND ERROR: %s", e)
 
 
 @bot.event
@@ -914,6 +917,7 @@ async def cmd_links(ctx):
 
 @bot.command(name="lb", aliases=["leaderboard"])
 async def cmd_lb(ctx, *, args: str = "today"):
+    log.info("cmd_lb called by %s with args=%r msg_id=%s", ctx.author.display_name, args, ctx.message.id)
     gid   = str(ctx.guild.id)
     today = datetime.now(timezone.utc).date()
 
