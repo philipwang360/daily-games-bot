@@ -957,15 +957,12 @@ async def cmd_crowns(ctx, *, args: str = "all"):
 
 
 @bot.command(name="reset")
-@commands.has_permissions(manage_guild=True)
-@commands.cooldown(1, 604800, commands.BucketType.guild)  # Once per week per guild (604800 seconds = 7 days)
 async def cmd_reset(ctx, confirm: str = ""):
-    """Manually reset the leaderboard (requires 'manage_guild' permission, 1 week cooldown)"""
+    """Manually reset the leaderboard"""
     if confirm.lower() != "confirm":
         await ctx.send(
             "⚠️ **Warning**: This will delete ALL leaderboard data for this server.\n"
-            "To confirm, type: `!zg reset confirm`\n\n"
-            "*Requires 'Manage Server' permission. 1 week cooldown.*"
+            "To confirm, type: `!zg reset confirm`"
         )
         return
     
@@ -1018,7 +1015,7 @@ async def cmd_help(ctx):
         f"`{PREFIX}links` — show all game links\n"
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
         f"`{PREFIX}setchannel` — disable auto-post\n"
-        f"`{PREFIX}reset confirm` — ⚠️ clear all data (admin only, 1 week cooldown)\n\n"
+        f"`{PREFIX}reset confirm` — ⚠️ clear all data\n\n"
         f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
     e.set_footer(text="Add new games → edit GAME PARSERS in bot.py")
     await ctx.send(embed=e)
