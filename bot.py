@@ -510,9 +510,12 @@ async def _manage_crown_reactions(channel, game: str, date: str,
     
     reactions_to_add = []
     
+    # Check if this is truly the first score (no other users have played this game today)
+    other_users = [r for r in all_scores if r["user_id"] != new_user_id]
+    
     # Special case: first score of the day gets both reactions
     # (they're simultaneously the best AND worst until someone else plays)
-    if len(all_scores) == 1:
+    if not other_users:
         log.info("First score of the day for %s - giving both 👑 and kelvDank", game)
         return ["👑", "kelvDank"]
     
@@ -520,10 +523,10 @@ async def _manage_crown_reactions(channel, game: str, date: str,
     if new_user_id in winners:
         reactions_to_add.append("👑")
         
-        # Remove crown from non-winners who previously had it
-        # (find users who have message_id and score != best_score)
+        # Remove crown from anyone who previously had it but no longer qualifies
+        # This includes the same user's old messages if they improved their score
         for r in all_scores:
-            if r["user_id"] != new_user_id and r.get("message_id"):
+            if r.get("message_id") and r["message_id"] != new_message_id:
                 if r["score"] != best_score:
                     # They previously had a crown but now don't qualify
                     await _remove_reaction_from_message(channel, r["message_id"], "👑")
@@ -532,9 +535,10 @@ async def _manage_crown_reactions(channel, game: str, date: str,
     if "👑" not in reactions_to_add and new_user_id in losers:
         reactions_to_add.append("kelvDank")
         
-        # Remove kelvDank from non-losers who previously had it
+        # Remove kelvDank from anyone who previously had it but no longer qualifies
+        # This includes the same user's old messages if they changed their score
         for r in all_scores:
-            if r["user_id"] != new_user_id and r.get("message_id"):
+            if r.get("message_id") and r["message_id"] != new_message_id:
                 if r["score"] != worst_score:
                     # They previously had kelvDank but now don't qualify
                     await _remove_reaction_from_message(channel, r["message_id"], "kelvDank")
