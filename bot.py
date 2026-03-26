@@ -707,6 +707,9 @@ config_store: dict[str, Optional[int]] = {}  # guild_id -> channel_id
 # Dedup set to prevent processing the same message twice
 _processed_message_ids: set[int] = set()
 
+# Flag to prevent commands from firing during history sync
+_syncing: bool = False
+
 
 @bot.event
 async def on_ready():
@@ -813,10 +816,13 @@ async def on_message(msg: discord.Message):
                         # Catch any other errors to prevent breaking the loop
                         log.info("Error adding %s reaction: %s", emoji, e)
     
-    try:
-        await bot.process_commands(msg)
-    except Exception as e:
-        log.info("COMMAND ERROR: %s", e)
+    # Don't process commands while syncing history - old command messages
+    # in history would otherwise re-trigger commands causing duplicate responses
+    if not _syncing:
+        try:
+            await bot.process_commands(msg)
+        except Exception as e:
+            log.info("COMMAND ERROR: %s", e)
 
 
 @bot.event
@@ -864,6 +870,8 @@ async def on_message_edit(_before, after: discord.Message):
 
 async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     """Fetch message history and populate the store"""
+    global _syncing
+    _syncing = True
     after = datetime.now(timezone.utc) - timedelta(days=days)
     message_count = 0
     result_count = 0
@@ -886,6 +894,8 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
             message_count += 1
     except discord.HTTPException as e:
         log.error("Error fetching history: %s", e)
+    finally:
+        _syncing = False
     
     log.info(f"Synced {message_count} messages, found {result_count} game results from last {days} days")
     return result_count
