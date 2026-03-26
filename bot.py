@@ -635,7 +635,8 @@ def _add_streaks(embed, rows):
         ud[r["user_id"]].add(r["puzzle_date"])
         un[r["user_id"]] = r["username"]
 
-    today   = datetime.now(timezone.utc).date()
+    # Use Eastern Time for streak calculation
+    today   = datetime.now(ZoneInfo("America/New_York")).date()
     streaks = []
     for uid, raw in ud.items():
         ds = sorted((datetime.strptime(d, "%Y-%m-%d").date()
@@ -744,7 +745,16 @@ async def on_message_edit(_before, after: discord.Message):
 
 async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     """Fetch message history and populate the store"""
-    after = datetime.now(timezone.utc) - timedelta(days=days)
+    # Calculate start time in Eastern Time
+    if days == 1:
+        # For 1 day (today), start from midnight ET
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        after = today_start_et.astimezone(timezone.utc)
+    else:
+        # For multiple days, use UTC calculation
+        after = datetime.now(timezone.utc) - timedelta(days=days)
+    
     message_count = 0
     result_count = 0
     
@@ -756,7 +766,9 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     log.info(f"Cleared {len(old_keys)} old entries before sync")
     
     try:
-        async for msg in channel.history(limit=1000, after=after, oldest_first=False):
+        # Fetch all messages from the last 24 hours
+        # Use larger limit to get more messages
+        async for msg in channel.history(limit=2000, after=after, oldest_first=False):
             if msg.author.bot:
                 continue
             
@@ -814,7 +826,8 @@ async def cmd_links(ctx):
 @bot.command(name="lb", aliases=["leaderboard"])
 async def cmd_lb(ctx, *, args: str = "today"):
     gid   = str(ctx.guild.id)
-    today = datetime.now(timezone.utc).date()
+    # Use Eastern Time for calendar day
+    today = datetime.now(ZoneInfo("America/New_York")).date()
 
     parts = args.split(maxsplit=1)
     first = parts[0].lower()
@@ -962,7 +975,8 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
 @bot.command(name="crowns")
 async def cmd_crowns(ctx, *, args: str = "all"):
     gid   = str(ctx.guild.id)
-    today = datetime.now(timezone.utc).date()
+    # Use Eastern Time for calendar day
+    today = datetime.now(ZoneInfo("America/New_York")).date()
 
     parts = args.split(maxsplit=1)
     first = parts[0].lower()
