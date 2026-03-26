@@ -704,6 +704,9 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 # Store for configured channels (in-memory only now)
 config_store: dict[str, Optional[int]] = {}  # guild_id -> channel_id
 
+# Dedup set to prevent processing the same message twice
+_processed_message_ids: set[int] = set()
+
 
 @bot.event
 async def on_ready():
@@ -743,6 +746,15 @@ async def on_command_error(ctx, error):
 async def on_message(msg: discord.Message):
     if msg.author.bot or not msg.guild:
         return
+    
+    # Deduplicate - ignore if we've already processed this message
+    if msg.id in _processed_message_ids:
+        log.info("DEDUP: skipping already-processed message id=%s", msg.id)
+        return
+    _processed_message_ids.add(msg.id)
+    # Keep set from growing forever - trim if too large
+    if len(_processed_message_ids) > 10000:
+        _processed_message_ids.clear()
     
     # Check for monthly reset when processing messages
     store.check_reset()
