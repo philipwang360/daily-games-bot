@@ -477,7 +477,7 @@ async def _manage_crown_reactions(channel, game: str, date: str,
                                   new_user_id: str, new_message_id: int,
                                   new_score, is_edit: bool = False):
     """
-    Manage crown and kelvDank reactions for a new score submission.
+    Manage crown and kelvDank reactions using the same logic as the leaderboard.
     Returns the emoji(s) to add to the new message.
     """
     # Skip if game doesn't award crowns
@@ -490,57 +490,57 @@ async def _manage_crown_reactions(channel, game: str, date: str,
     # Get all scores for this game/date (including the new one we just saved)
     all_scores = _get_game_scores_for_date(guild_id, game, date)
     
+    # Use the SAME logic as the leaderboard to compute winners
+    meta = _GAME_META.get(game.lower(), {})
+    low = meta.get("low", False)
+    
+    # Find all scores
+    score_values = [r["score"] for r in all_scores]
+    
+    if not score_values:
+        return "📊"  # Shouldn't happen, but safety check
+    
+    # Compute best (for crown)
+    best_score = min(score_values) if low else max(score_values)
+    winners = {r["user_id"] for r in all_scores if r["score"] == best_score}
+    
+    # Compute worst (for kelvDank)
+    worst_score = max(score_values) if low else min(score_values)
+    losers = {r["user_id"] for r in all_scores if r["score"] == worst_score}
+    
+    reactions_to_add = []
+    
+    # Special case: first score of the day gets both reactions
+    # (they're simultaneously the best AND worst until someone else plays)
     if len(all_scores) == 1:
-        # First score of the day - they could be best OR worst, we don't know!
-        # Give them both reactions to keep them humble
         log.info("First score of the day for %s - giving both 👑 and kelvDank", game)
         return ["👑", "kelvDank"]
     
-    # Filter out the new user's score for comparison (we want to compare against existing scores only)
-    other_scores = [r for r in all_scores if r["user_id"] != new_user_id]
-    
-    # Find current best and worst among OTHER users (not including the new submission)
-    best_score, current_winners = _find_current_winners_and_best(other_scores, game)
-    worst_score, current_losers = _find_current_worst(other_scores, game)
-    
-    low = _is_lower_is_better(game)
-    reactions_to_add = []
-    
-    # Handle crown logic
-    if best_score is None:
-        # No other scores yet (shouldn't happen since len > 1, but safety check)
+    # Crown logic: is the new user a winner?
+    if new_user_id in winners:
         reactions_to_add.append("👑")
-    elif new_score == best_score:
-        # Tie for best - get crown
-        reactions_to_add.append("👑")
-    elif (new_score < best_score) if low else (new_score > best_score):
-        # New best! Remove crown from previous winner(s)
-        for winner_id in current_winners:
-            for r in other_scores:
-                if r["user_id"] == winner_id and r.get("message_id"):
+        
+        # Remove crown from non-winners who previously had it
+        # (find users who have message_id and score != best_score)
+        for r in all_scores:
+            if r["user_id"] != new_user_id and r.get("message_id"):
+                if r["score"] != best_score:
+                    # They previously had a crown but now don't qualify
                     await _remove_reaction_from_message(channel, r["message_id"], "👑")
-                    break
-        reactions_to_add.append("👑")
     
-    # Handle kelvDank logic (only if not also getting crown)
-    if "👑" not in reactions_to_add:
-        if worst_score is None:
-            # No other scores (safety check)
-            reactions_to_add.append("kelvDank")
-        elif new_score == worst_score:
-            # Tie for worst - get kelvDank
-            reactions_to_add.append("kelvDank")
-        elif (new_score > worst_score) if low else (new_score < worst_score):
-            # New worst! Remove kelvDank from previous loser(s)
-            for loser_id in current_losers:
-                for r in other_scores:
-                    if r["user_id"] == loser_id and r.get("message_id"):
-                        await _remove_reaction_from_message(channel, r["message_id"], "kelvDank")
-                        break
-            reactions_to_add.append("kelvDank")
-        else:
-            # Just a regular score
-            reactions_to_add.append("📊")
+    # kelvDank logic: is the new user a loser? (only if not also a winner)
+    if "👑" not in reactions_to_add and new_user_id in losers:
+        reactions_to_add.append("kelvDank")
+        
+        # Remove kelvDank from non-losers who previously had it
+        for r in all_scores:
+            if r["user_id"] != new_user_id and r.get("message_id"):
+                if r["score"] != worst_score:
+                    # They previously had kelvDank but now don't qualify
+                    await _remove_reaction_from_message(channel, r["message_id"], "kelvDank")
+    elif "👑" not in reactions_to_add:
+        # Middle of the pack
+        reactions_to_add.append("📊")
     
     return reactions_to_add[0] if len(reactions_to_add) == 1 else reactions_to_add
 
@@ -780,13 +780,16 @@ async def on_message(msg: discord.Message):
                     try:
                         await msg.add_reaction(emoji)
                     except discord.HTTPException as e:
-                        if emoji == "kelvDank":
-                            # kelvDank emoji doesn't exist, silently skip it
-                            log.info("kelvDank emoji not available for %s, skipping", r.game)
+                        if emoji == "kelvDank" and e.status == 404:
+                            # kelvDank emoji doesn't exist in this server
+                            log.info("kelvDank emoji not found in server for %s, skipping", r.game)
+                        elif e.status == 429:
+                            # Rate limit - discord.py will retry automatically
+                            # Just log it, don't add fallback
+                            log.debug("Rate limited adding %s, discord.py will retry", emoji)
                         else:
-                            # For other emojis (👑, 📊), let discord.py handle rate limiting
-                            # or log other errors
-                            log.info("Failed to add %s reaction: %s", emoji, e)
+                            # Other HTTP errors
+                            log.info("Failed to add %s reaction (status %s): %s", emoji, e.status, e)
                     except Exception as e:
                         # Catch any other errors to prevent breaking the loop
                         log.info("Error adding %s reaction: %s", emoji, e)
