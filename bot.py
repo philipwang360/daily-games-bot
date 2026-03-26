@@ -545,17 +545,17 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     message_count = 0
     result_count = 0
     
-    # Clear old data for this guild to ensure fresh sync
-    old_keys = [k for k, r in store.results.items() if r["guild_id"] == gid]
-    for k in old_keys:
-        del store.results[k]
-    if old_keys:
-        log.info(f"Cleared {len(old_keys)} old entries")
-    
     try:
         async for msg in channel.history(limit=2000, after=after, oldest_first=False):
             if msg.author.bot:
                 continue
+            
+            # Skip messages before crown reset date
+            if crown_reset_date:
+                msg_date = msg.created_at.astimezone(ZoneInfo("America/New_York")).date()
+                reset_date = crown_reset_date.date()
+                if msg_date < reset_date:
+                    continue
             
             results = parse_message(msg.content)
             if results:
@@ -614,6 +614,17 @@ async def on_message(msg: discord.Message):
         return
     
     store.check_reset()
+    
+    # Check if message is before crown reset date - don't save old data
+    gid = str(msg.guild.id)
+    crown_reset_date = store.get_crown_reset_date(gid)
+    if crown_reset_date:
+        msg_date = msg.created_at.astimezone(ZoneInfo("America/New_York")).date()
+        reset_date = crown_reset_date.date()
+        if msg_date < reset_date:
+            log.info("Skipping old message from %s (before crown reset %s)", 
+                     msg_date, reset_date)
+            return
     
     log.info("MSG from %s: %s", msg.author.display_name, msg.content[:80])
     results = parse_message(msg.content)
@@ -895,16 +906,21 @@ async def cmd_reset_crowns(ctx, confirm: str = ""):
     
     gid = str(ctx.guild.id)
     
-    # Set the crown reset date to now
+    # Clear ALL existing data for this guild from the store
+    old_keys = [k for k, r in store.results.items() if r["guild_id"] == gid]
+    for k in old_keys:
+        del store.results[k]
+    
+    # Set the crown reset date to today
     reset_date = store.reset_crowns(gid)
     
     # Format the date nicely
-    formatted_date = reset_date.strftime("%B %d, %Y at %I:%M %p ET")
+    formatted_date = reset_date.strftime("%B %d, %Y")
     
-    log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} at {reset_date}")
+    log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} at {reset_date}, cleared {len(old_keys)} old entries")
     await ctx.send(f"👑 **Crowns Reset**: Crown counts reset to 0!\n"
-                   f"Crowns will now only count from **{formatted_date}** forward.\n"
-                   f"Today's leaderboard data is preserved.")
+                   f"Cleared {len(old_keys)} old results.\n"
+                   f"Crowns will now only count from **{formatted_date}** forward.")
 
 
 @bot.command(name="setchannel")
