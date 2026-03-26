@@ -480,6 +480,11 @@ def _compute_crowns(rows):
         normalized_name = _normalize_game_name(r["game"])
         if normalized_name in NO_CROWN_GAMES:
             continue
+        
+        # Skip failed attempts where score > max_score (e.g., X/6 in Wordle = 7/6, failed Framed = 7/6)
+        if r["score"] > r["max_score"]:
+            continue
+            
         by_gd[(r["game"], r["puzzle_date"])].append(r)
 
     user_crowns:   dict[tuple, int]       = defaultdict(int)
@@ -722,6 +727,30 @@ async def on_message(msg: discord.Message):
             store.save(gid, uid, name, r, d)
             log.info("  📊  %s  ·  %s %s", name, r.game, r.display)
         await msg.add_reaction("📊")
+        
+        # Check if any of these results would earn a crown today
+        for r in results:
+            # Skip if failed attempt
+            if r.score > r.max_score:
+                continue
+            
+            # Check if this is the best score for this game today
+            meta = _GAME_META.get(r.game.lower(), {})
+            low = meta.get("low", False)
+            
+            # Fetch all results for this game today
+            all_game_results = store.fetch(gid, date=d, game=r.game)
+            if all_game_results:
+                scores = [res["score"] for res in all_game_results]
+                best_score = min(scores) if low else max(scores)
+                
+                # If this score equals the best, they get a crown!
+                if r.score == best_score:
+                    try:
+                        await msg.add_reaction("👑")
+                        log.info(f"  👑 Crown reaction added for {name} - {r.game}")
+                    except discord.HTTPException as e:
+                        log.error(f"Failed to add crown reaction: {e}")
     
     try:
         await bot.process_commands(msg)
