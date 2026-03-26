@@ -748,6 +748,13 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     message_count = 0
     result_count = 0
     
+    # Clear old data for this channel to ensure fresh sync
+    gid = str(channel.guild.id)
+    old_keys = [k for k, r in store.results.items() if r["guild_id"] == gid]
+    for k in old_keys:
+        del store.results[k]
+    log.info(f"Cleared {len(old_keys)} old entries before sync")
+    
     try:
         async for msg in channel.history(limit=1000, after=after, oldest_first=False):
             if msg.author.bot:
@@ -756,7 +763,6 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
             results = parse_message(msg.content)
             if results:
                 date_str = msg.created_at.strftime("%Y-%m-%d")
-                gid = str(channel.guild.id)
                 uid = str(msg.author.id)
                 name = msg.author.display_name
                 
@@ -851,15 +857,14 @@ async def cmd_lb(ctx, *, args: str = "today"):
         meta = _GAME_META.get(game_name.lower(), {})
         title += f"  ·  {meta.get('icon','🎮')} {game_name}"
 
-    # First try in-memory store
-    rows = store.fetch(gid, **kw)
-    
-    # If no results, sync from message history
-    if not rows and isinstance(ctx.channel, discord.TextChannel):
+    # Always sync from history for single-day queries to ensure completeness
+    if isinstance(ctx.channel, discord.TextChannel) and single_day:
         await ctx.send("🔄 Fetching message history...", delete_after=3)
-        days_to_sync = 1 if single_day else (7 if period == "week" else 30)
+        days_to_sync = 1 if period in ["today", "yesterday", "yday"] else (7 if period == "week" else 30)
         await sync_history_to_store(ctx.channel, days=days_to_sync)
-        rows = store.fetch(gid, **kw)
+    
+    # Fetch results from store (which now has fresh data if we synced)
+    rows = store.fetch(gid, **kw)
 
     if single_day:
         embed = _build_daily_embed(title, rows)
