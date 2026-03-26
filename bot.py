@@ -51,6 +51,8 @@ class ResultsStore:
         # Structure: {(guild_id, user_id, game, date): GameResult}
         self.results: dict[tuple, dict] = {}
         self.current_month: int = datetime.now(timezone.utc).month
+        # Track manual resets per guild to prevent auto-sync from undoing them
+        self.manually_reset_guilds: set[str] = set()
     
     def check_reset(self):
         """Reset storage if we've entered a new month"""
@@ -886,6 +888,9 @@ PERIODS = {"today", "yesterday", "yday", "week", "month", "all"}
 @bot.command(name="sync")
 async def cmd_sync(ctx, days: int = 30):
     """Manually sync message history to populate the store"""
+    gid = str(ctx.guild.id)
+    # Explicitly syncing clears the manual reset flag
+    store.manually_reset_guilds.discard(gid)
     await ctx.send(f"🔄 Syncing last {days} days of message history...")
     count = await sync_history_to_store(ctx.channel, days)
     await ctx.send(f"✅ Found {count} game results!")
@@ -959,8 +964,8 @@ async def cmd_lb(ctx, *, args: str = "today"):
     # First try in-memory store
     rows = store.fetch(gid, **kw)
     
-    # If no results, sync from message history
-    if not rows and isinstance(ctx.channel, discord.TextChannel):
+    # If no results, sync from message history (unless guild was manually reset)
+    if not rows and gid not in store.manually_reset_guilds and isinstance(ctx.channel, discord.TextChannel):
         await ctx.send("🔄 Fetching message history...", delete_after=3)
         days_to_sync = 1 if single_day else (7 if period == "week" else 30)
         await sync_history_to_store(ctx.channel, days=days_to_sync)
@@ -1001,8 +1006,8 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     # Fetch from in-memory store
     rows = store.fetch(gid, uid=uid)
     
-    # If no results, sync from history first
-    if not rows and isinstance(ctx.channel, discord.TextChannel):
+    # If no results, sync from history first (unless guild was manually reset)
+    if not rows and gid not in store.manually_reset_guilds and isinstance(ctx.channel, discord.TextChannel):
         await ctx.send("🔄 Fetching your history...", delete_after=3)
         await sync_history_to_store(ctx.channel, days=30)
         rows = store.fetch(gid, uid=uid)
@@ -1096,8 +1101,8 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     # Fetch from in-memory store
     rows = store.fetch(gid, **kw)
     
-    # If no results, sync from history first
-    if not rows and isinstance(ctx.channel, discord.TextChannel):
+    # If no results, sync from history first (unless guild was manually reset)
+    if not rows and gid not in store.manually_reset_guilds and isinstance(ctx.channel, discord.TextChannel):
         await ctx.send("🔄 Fetching leaderboard history...", delete_after=3)
         days_to_sync = 1 if period == "today" else (7 if period == "week" else 30)
         await sync_history_to_store(ctx.channel, days=days_to_sync)
@@ -1172,6 +1177,9 @@ async def cmd_reset(ctx, confirm: str = ""):
     keys_to_delete = [k for k, r in store.results.items() if r["guild_id"] == gid]
     for k in keys_to_delete:
         del store.results[k]
+    
+    # Mark this guild as manually reset to prevent auto-sync from refilling it
+    store.manually_reset_guilds.add(gid)
     
     log.info(f"🗑️  Manual reset by {ctx.author.name}: cleared {count} results for guild {gid}")
     await ctx.send(f"🗑️ **Leaderboard Reset**: Cleared {count} entries. Fresh start!")
