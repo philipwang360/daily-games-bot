@@ -815,6 +815,7 @@ async def on_message_edit(_before, after: discord.Message):
     # Check for monthly reset
     store.check_reset()
     
+    log.info("EDIT from %s (id=%s): %s", after.author.display_name, after.id, after.content[:80])
     results = parse_message(after.content)
     if results:
         d    = after.created_at.strftime("%Y-%m-%d")
