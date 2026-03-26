@@ -319,7 +319,7 @@ GAME_LINKS = {
     "LoLdle": "https://loldle.net/",
     "Narutodle": "https://narutodle.com/",
     "WhenTaken": "https://whentaken.com/",
-    "Dialed": "https://dialed.wtf/",
+    "Dialed": "https://dialed.gg/",
     "Catfishing": "https://catfishing.net/",
     "Feudle": "https://feudlegame.com/",
     "Doctordle": "https://doctordle.com/",
