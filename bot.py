@@ -51,6 +51,34 @@ class ResultsStore:
     def map_name_to_id(self, guild_id: str, name: str, user_id: str):
         """Map a display name to a user ID for consistent identification"""
         self.name_to_id[(guild_id, name)] = user_id
+        # Also reconcile any existing Wordle entries with this name
+        self._reconcile_wordle_entries(guild_id, name, user_id)
+    
+    def _reconcile_wordle_entries(self, guild_id: str, name: str, user_id: str):
+        """Update existing Wordle entries to use the correct user_id"""
+        updated = 0
+        keys_to_update = []
+        
+        for key, r in self.results.items():
+            if (r["guild_id"] == guild_id and 
+                r["game"] == "Wordle" and 
+                r["user_id"] == name and  # Currently stored with name as ID
+                r["username"] == name):
+                # Found a Wordle entry that needs updating
+                keys_to_update.append(key)
+        
+        for old_key in keys_to_update:
+            r = self.results[old_key]
+            # Create new key with correct user_id
+            new_key = (guild_id, user_id, r["game"], r["puzzle_date"])
+            # Update the record
+            r["user_id"] = user_id
+            self.results[new_key] = r
+            del self.results[old_key]
+            updated += 1
+        
+        if updated > 0:
+            log.info(f"Reconciled {updated} Wordle entries for {name} -> {user_id}")
     
     def get_user_id_from_name(self, guild_id: str, name: str) -> str:
         """Get user ID from display name, or return name if not mapped"""
