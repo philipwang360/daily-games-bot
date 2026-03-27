@@ -190,6 +190,62 @@ def _wordle(m):
     return int(v), 6, f"{v}/6"
 
 
+def parse_wordle_group_summary(text: str) -> list[tuple]:
+    """
+    Parse Wordle group summary messages like:
+    Your group is on a 17 day streak! 🔥 Here are yesterday's results:
+    👑 3/6: @Zerowaltz
+    4/6: @toooots
+    5/6: @AsparagusFry @figittobe #LUMILEAGUE @Qwert #ARTEMISALLIANCE
+    
+    Returns list of (username, score, max_score, display) tuples
+    """
+    # Check if this is a group summary message
+    if "Here are yesterday's results" not in text and "Here are today's results" not in text:
+        return []
+    
+    results = []
+    # Pattern: optional 👑, then score/X: followed by @mentions or text
+    # Match lines like: "👑 3/6: @Zerowaltz" or "4/6: @toooots" or "5/6: @user1 @user2 #HASHTAG"
+    pattern = r'(?:👑\s*)?(\d|X)/(\d+):\s*(.+)'
+    
+    for line in text.split('\n'):
+        match = re.search(pattern, line.strip())
+        if match:
+            score_str = match.group(1).upper()
+            max_score = int(match.group(2))
+            names_part = match.group(3)
+            
+            # Parse score
+            if score_str == "X":
+                score = 7  # Failed = 7 for sorting (higher is worse)
+            else:
+                score = int(score_str)
+            
+            display = f"{score_str}/{max_score}"
+            
+            # Extract usernames from the names part
+            # Pattern: @username or plain username before hashtags
+            # Remove hashtags first, then split by @
+            names_clean = re.sub(r'#\S+', '', names_part).strip()
+            
+            # Find all @mentions or plain names separated by spaces
+            users = []
+            parts = names_clean.split()
+            for part in parts:
+                if part.startswith('@'):
+                    users.append(part[1:])  # Remove @
+                elif part and not part.startswith('#'):
+                    # Could be a plain name without @
+                    users.append(part)
+            
+            for username in users:
+                if username:
+                    results.append((username, score, max_score, display))
+    
+    return results
+
+
 @game_parser("Pokédle", r"#Pokédle[\s\S]*?in\s+(\d+)\s+shots?",
              lower_is_better=True, icon="⚔️")
 def _pokedle(m):
@@ -547,7 +603,9 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     
     try:
         async for msg in channel.history(limit=2000, after=after, oldest_first=False):
-            if msg.author.bot:
+            # Skip bot messages except Wordle app
+            is_wordle_bot = msg.author.bot and "wordle" in msg.author.name.lower()
+            if msg.author.bot and not is_wordle_bot:
                 continue
             
             # Skip messages before crown reset date
@@ -557,15 +615,25 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
                 if msg_date < reset_date:
                     continue
             
-            results = parse_message(msg.content)
-            if results:
+            # Check for Wordle group summary
+            wordle_results = parse_wordle_group_summary(msg.content)
+            if wordle_results:
                 date_str = msg.created_at.strftime("%Y-%m-%d")
-                uid = str(msg.author.id)
-                name = msg.author.display_name
-                
-                for r in results:
-                    store.save(gid, uid, name, r, date_str)
+                for username, score, max_score, display in wordle_results:
+                    result = GameResult("Wordle", score, max_score, display)
+                    store.save(gid, username, username, result, date_str)
                     result_count += 1
+            else:
+                # Normal parsing
+                results = parse_message(msg.content)
+                if results:
+                    date_str = msg.created_at.strftime("%Y-%m-%d")
+                    uid = str(msg.author.id)
+                    name = msg.author.display_name
+                    
+                    for r in results:
+                        store.save(gid, uid, name, r, date_str)
+                        result_count += 1
             message_count += 1
     except discord.HTTPException as e:
         log.error("Error fetching history: %s", e)
@@ -610,7 +678,12 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_message(msg: discord.Message):
-    if msg.author.bot or not msg.guild:
+    if not msg.guild:
+        return
+    
+    # Allow Wordle bot messages for group summaries
+    is_wordle_bot = msg.author.bot and "wordle" in msg.author.name.lower()
+    if msg.author.bot and not is_wordle_bot:
         return
     
     store.check_reset()
@@ -627,16 +700,31 @@ async def on_message(msg: discord.Message):
             return
     
     log.info("MSG from %s: %s", msg.author.display_name, msg.content[:80])
-    results = parse_message(msg.content)
-    if results:
-        d    = msg.created_at.strftime("%Y-%m-%d")
-        gid  = str(msg.guild.id)
-        uid  = str(msg.author.id)
-        name = msg.author.display_name
-        for r in results:
-            store.save(gid, uid, name, r, d)
-            log.info("  📊  %s  ·  %s %s", name, r.game, r.display)
+    
+    # Check for Wordle group summary
+    wordle_results = parse_wordle_group_summary(msg.content)
+    if wordle_results:
+        d = msg.created_at.strftime("%Y-%m-%d")
+        gid = str(msg.guild.id)
+        for username, score, max_score, display in wordle_results:
+            # Create a GameResult
+            result = GameResult("Wordle", score, max_score, display)
+            # Use username as user_id (we don't have actual Discord ID from summary)
+            store.save(gid, username, username, result, d)
+            log.info("  📊  %s  ·  Wordle %s", username, display)
         await msg.add_reaction("📊")
+    else:
+        # Normal parsing for user messages
+        results = parse_message(msg.content)
+        if results:
+            d    = msg.created_at.strftime("%Y-%m-%d")
+            gid  = str(msg.guild.id)
+            uid  = str(msg.author.id)
+            name = msg.author.display_name
+            for r in results:
+                store.save(gid, uid, name, r, d)
+                log.info("  📊  %s  ·  %s %s", name, r.game, r.display)
+            await msg.add_reaction("📊")
     
     try:
         await bot.process_commands(msg)
