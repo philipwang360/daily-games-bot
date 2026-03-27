@@ -389,10 +389,27 @@ def _framed(m):
 @game_parser("Birdle", r"USA\s+(?:Lower\s+48|World|UK)?\s*Birdle\s*\n(\d{4}-\d{2}-\d{2})\s*\n([🐦❌\n]+)",
              lower_is_better=True, icon="🐦")
 def _birdle(m):
-    # Count the number of rows (lines with emojis)
+    # Parse the grid
     grid_text = m.group(2).strip()
-    rows = len([line for line in grid_text.split('\n') if line.strip()])
-    return rows, 6, f"{rows}/6"
+    rows = [line.strip() for line in grid_text.split('\n') if line.strip()]
+    
+    # Check if they succeeded (any row with all 🐦, no ❌)
+    succeeded = False
+    success_row = 0
+    
+    for i, row in enumerate(rows, 1):
+        if '❌' not in row and len(row) >= 4:
+            # Row has no X's and at least 4 emojis - success!
+            succeeded = True
+            success_row = i
+            break
+    
+    if succeeded:
+        # Return the row number where they succeeded
+        return success_row, 6, f"{success_row}/6"
+    else:
+        # Failed - return X/6 or 7/6 (like Wordle)
+        return 7, 6, "X/6"
 
 
 @game_parser("Costcodle", r"Costcodle\s*#\d+\s+(\d)/6",
