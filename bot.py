@@ -1171,71 +1171,89 @@ async def cmd_merge(ctx, source: str, target: str):
     """Manually merge two user entries (source -> target). Use Discord IDs or usernames."""
     gid = str(ctx.guild.id)
     
-    # Find all results for source user
+    # Helper to extract ID from mention format <@123456789>
+    def extract_id(s):
+        if s.startswith('<@') and s.endswith('>'):
+            return s[2:-1]  # Remove <@ and >
+        if s.startswith('<@!'):
+            return s[3:-1]  # Remove <@! and > (nickname mention)
+        return s
+    
+    source_clean = extract_id(source)
+    target_clean = extract_id(target)
+    
+    # Try to find source by ID, then by username patterns
+    source_keys = []
+    
+    # First try exact match
     source_keys = [k for k, r in store.results.items() 
-                   if r["guild_id"] == gid and r["user_id"] == source]
+                   if r["guild_id"] == gid and r["user_id"] == source_clean]
+    
+    # If not found, try with @ prefix
+    if not source_keys and not source_clean.startswith('@'):
+        source_keys = [k for k, r in store.results.items() 
+                       if r["guild_id"] == gid and r["user_id"] == f"@{source_clean}"]
+    
+    # If still not found, try case-insensitive username match
+    if not source_keys:
+        source_keys = [k for k, r in store.results.items() 
+                       if r["guild_id"] == gid and r["username"].lower() == source_clean.lower().lstrip('@')]
     
     if not source_keys:
-        return await ctx.send(f"❌ No data found for user: `{source}`")
+        # List available users for debugging
+        available_users = set()
+        for r in store.results.values():
+            if r["guild_id"] == gid:
+                available_users.add(f"`{r['user_id']}` ({r['username']})")
+        
+        users_list = "\n".join(sorted(available_users)[:10]) if available_users else "No users found"
+        return await ctx.send(f"❌ No data found for user: `{source}` (tried: `{source_clean}`)\n\n"
+                             f"**Available users in this guild:**\n{users_list}\n\n"
+                             f"Tip: Use the exact user_id or username from the list above.")
     
     # Get target user's display name if available
-    target_name = target
+    target_name = target_clean
     for r in store.results.values():
-        if r["guild_id"] == gid and r["user_id"] == target:
-            target_name = r["username"]
-            break
+        if r["guild_id"] == gid:
+            if r["user_id"] == target_clean or r["user_id"] == f"@{target_clean}":
+                target_name = r["username"]
+                target_clean = r["user_id"]  # Use the stored ID format
+                break
     
     # Merge source into target
     merged = 0
     for key in source_keys:
         r = store.results[key]
         # Create new key with target user_id
-        new_key = (gid, target, r["game"], r["puzzle_date"])
+        new_key = (gid, target_clean, r["game"], r["puzzle_date"])
         
         # If target already has entry for this game/date, keep the better score
         if new_key in store.results:
             existing = store.results[new_key]
-            # Compare scores (lower is better for some games)
             meta = _GAME_META.get(r["game"].lower(), {})
             low = meta.get("low", False)
             
             if low:
-                # Lower is better
                 if r["score"] < existing["score"]:
-                    store.results[new_key] = {
-                        **r,
-                        "user_id": target,
-                        "username": target_name
-                    }
+                    store.results[new_key] = {**r, "user_id": target_clean, "username": target_name}
             else:
-                # Higher is better
                 if r["score"] > existing["score"]:
-                    store.results[new_key] = {
-                        **r,
-                        "user_id": target,
-                        "username": target_name
-                    }
+                    store.results[new_key] = {**r, "user_id": target_clean, "username": target_name}
         else:
-            # No conflict, just move it
-            store.results[new_key] = {
-                **r,
-                "user_id": target,
-                "username": target_name
-            }
+            store.results[new_key] = {**r, "user_id": target_clean, "username": target_name}
         
-        # Delete old entry
         del store.results[key]
         merged += 1
     
-    # Create mapping so future Wordle entries get attributed correctly
-    if source.startswith("@"):
-        clean_name = source[1:]
-        store.name_to_id[(gid, clean_name)] = target
-    store.name_to_id[(gid, source)] = target
+    # Create mapping
+    clean_source = source_clean.lstrip('@')
+    store.name_to_id[(gid, clean_source)] = target_clean
+    store.name_to_id[(gid, f"@{clean_source}")] = target_clean
+    store.name_to_id[(gid, source_clean)] = target_clean
     
     await ctx.send(f"✅ **Merged {merged} entries**\n"
-                   f"• Source: `{source}`\n"
-                   f"• Target: `{target}` ({target_name})\n\n"
+                   f"• Source: `{source}` → `{source_clean}`\n"
+                   f"• Target: `{target}` → `{target_clean}` ({target_name})\n\n"
                    f"Run `!zg crowns` to see updated leaderboard!")
 
 
