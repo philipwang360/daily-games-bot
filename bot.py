@@ -409,6 +409,9 @@ GAME_LINKS = {
 
 NO_CROWN_GAMES = {"doctordle", "loldle", "narutodle", "pokedle", "whentaken"}
 
+# Games that count for crowns but don't show in the breakdown
+SIMPLE_CROWN_GAMES = {"wordle"}
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  SCORING HELPERS
@@ -1035,10 +1038,13 @@ async def cmd_crowns(ctx, *, args: str = "month"):
     for _rank, medal, (uid, data) in ranked[:15]:
         game_parts = []
         for g, c in sorted(data["by_game"].items(), key=lambda x: x[1], reverse=True):
+            # Skip games that count simply (no breakdown)
+            if g.lower() in SIMPLE_CROWN_GAMES:
+                continue
             meta = _GAME_META.get(g.lower(), {})
             icon = meta.get('icon', '🎮')
             game_parts.append(f"{icon} {g}: {c}")
-        breakdown = " · ".join(game_parts)
+        breakdown = " · ".join(game_parts) if game_parts else "No detailed breakdown"
         lines.append(
             f"{medal} **{data['name']}** — **{data['total']}** crowns\n"
             f"╰ {breakdown}")
