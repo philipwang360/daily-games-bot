@@ -1111,6 +1111,43 @@ async def cmd_reset_crowns(ctx, confirm: str = "", date_str: str = ""):
                    f"Crowns will now only count from **{formatted_date}** forward.")
 
 
+@bot.command(name="reconcile")
+@commands.has_permissions(manage_guild=True)
+async def cmd_reconcile(ctx):
+    """Manually reconcile all Wordle entries to merge duplicates"""
+    gid = str(ctx.guild.id)
+    
+    # Count current state
+    before_count = len([r for r in store.results.values() if r["guild_id"] == gid])
+    
+    # Reconcile all names in the mapping
+    reconciled = 0
+    for (g, name), user_id in list(store.name_to_id.items()):
+        if g == gid:
+            store._reconcile_wordle_entries(gid, name, user_id)
+            reconciled += 1
+    
+    # Also try to discover mappings from existing non-Wordle entries
+    discovered = 0
+    for r in store.results.values():
+        if r["guild_id"] == gid and r["game"] != "Wordle":
+            # This has a real user_id, check if we can map the username
+            username = r["username"]
+            user_id = r["user_id"]
+            if username != user_id and (gid, username) not in store.name_to_id:
+                # Found a mapping we didn't have
+                store.map_name_to_id(gid, username, user_id)
+                discovered += 1
+    
+    after_count = len([r for r in store.results.values() if r["guild_id"] == gid])
+    
+    await ctx.send(f"🔄 **Reconciliation Complete**\n"
+                   f"• Reconciled {reconciled} known name mappings\n"
+                   f"• Discovered {discovered} new name mappings\n"
+                   f"• Results: {before_count} → {after_count} entries\n\n"
+                   f"Duplicates should now be merged in crown leaderboard!")
+
+
 @bot.command(name="setchannel")
 @commands.has_permissions(manage_guild=True)
 async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
@@ -1145,7 +1182,8 @@ async def cmd_help(ctx):
     e.add_field(name="⚙️  Admin Commands", inline=False, value=(
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
         f"`{PREFIX}setchannel` — disable auto-post\n"
-        f"`{PREFIX}resetcrowns confirm` — reset crown competition\n\n"
+        f"`{PREFIX}resetcrowns confirm` — reset crown competition\n"
+        f"`{PREFIX}reconcile` — merge duplicate Wordle entries (admin only)\n\n"
         f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
     e.add_field(name="📚  Other Commands", inline=False, value=(
         f"`{PREFIX}games` — list supported games\n"
@@ -1210,8 +1248,11 @@ async def monthly_reset_check():
 @tasks.loop(time=dt_time(hour=8, minute=0, tzinfo=ZoneInfo("America/New_York")))
 async def daily_links():
     """Post daily game links at 8AM ET"""
+    today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    
     for guild in bot.guilds:
         gid = str(guild.id)
+        
         channel_id = config_store.get(gid)
         
         if not channel_id:
@@ -1236,8 +1277,23 @@ async def daily_links():
         today = datetime.now(ZoneInfo("America/New_York"))
         embed.set_footer(text=f"{today.strftime('%A, %B %d')} · Good luck!")
         
-        await ch.send(embed=embed)
+        sent_msg = await ch.send(embed=embed)
         log.info("Links sent → %s", guild.name)
+        
+        # Check for and delete duplicate links posted today (from other instances)
+        try:
+            async for msg in ch.history(limit=20):
+                if (msg.id != sent_msg.id and  # Don't delete the one we just posted
+                    msg.author.id == bot.user.id and 
+                    msg.embeds and 
+                    msg.embeds[0].title == "🎮  Daily Games Links"):
+                    msg_date = msg.created_at.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+                    if msg_date == today_str:
+                        log.info(f"Deleting duplicate links message from today in {guild.name}")
+                        await msg.delete()
+                        break  # Only delete one duplicate
+        except Exception as e:
+            log.error(f"Error cleaning up duplicates: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════
