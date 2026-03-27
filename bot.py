@@ -193,9 +193,6 @@ def _wordle(m):
 def parse_wordle_group_summary(text: str, msg_created_at=None) -> list[tuple]:
     """
     Parse Wordle group summary messages.
-    Note: "yesterday's results" means the game completed today, posted at end of day.
-    The game date is the message date, not adjusted by the text.
-    
     Returns list of (username, score, max_score, display, game_date) tuples
     """
     # Check if this is a group summary message
@@ -204,13 +201,14 @@ def parse_wordle_group_summary(text: str, msg_created_at=None) -> list[tuple]:
     if not is_summary:
         return []
     
-    # Use the message date as the game date (when the summary was posted)
+    # Use the message date as the game date
     if msg_created_at:
         game_date = msg_created_at.astimezone(ZoneInfo("America/New_York")).date()
     else:
         game_date = datetime.now(ZoneInfo("America/New_York")).date()
     
     results = []
+    # Pattern: optional 👑, then score/X: followed by @mentions or text
     pattern = r'(?:👑\s*)?(\d|X)/(\d+):\s*(.+)'
     
     for line in text.split('\n'):
@@ -227,14 +225,17 @@ def parse_wordle_group_summary(text: str, msg_created_at=None) -> list[tuple]:
             
             display = f"{score_str}/{max_score}"
             
-            names_clean = re.sub(r'#\S+', '', names_part).strip()
+            # Extract usernames - only @mentions, skip hashtags and empty strings
             users = []
-            parts = names_clean.split()
-            for part in parts:
+            # Split by spaces and look for @mentions
+            for part in names_part.split():
+                part = part.strip()
                 if part.startswith('@'):
-                    users.append(part[1:])
-                elif part and not part.startswith('#'):
-                    users.append(part)
+                    # Remove @ and any trailing punctuation
+                    username = part[1:].strip('.,!?;:')
+                    if username and not username.startswith('#'):
+                        users.append(username)
+                # Ignore plain text names (not @mentions) and hashtags
             
             for username in users:
                 if username:
@@ -985,31 +986,65 @@ async def cmd_crowns(ctx, *, args: str = "month"):
 
 @bot.command(name="resetcrowns")
 @commands.has_permissions(manage_guild=True)
-async def cmd_reset_crowns(ctx, confirm: str = ""):
-    """Reset crown counts to 0 - crowns will only count from now forward"""
+async def cmd_reset_crowns(ctx, confirm: str = "", date_str: str = ""):
+    """Reset crown counts to 0 - crowns will only count from specified date (or today) forward"""
     if confirm.lower() != "confirm":
         await ctx.send(
             "⚠️ **Warning**: This will reset ALL crown counts to 0.\n"
             "Leaderboard data will be preserved, but crowns will only count from now forward.\n"
-            "To confirm, type: `!zg resetcrowns confirm`\n\n"
+            "To confirm, type: `!zg resetcrowns confirm`\n"
+            "To reset to a specific date: `!zg resetcrowns confirm 3-26-2025`\n\n"
             "*Requires 'Manage Server' permission.*"
         )
         return
     
     gid = str(ctx.guild.id)
     
+    # Parse date if provided, otherwise use today
+    reset_date = None
+    if date_str:
+        try:
+            # Try various date formats: M-D-YYYY, M/D/YYYY, M-D-YY, etc.
+            for fmt in ["%m-%d-%Y", "%m/%d/%Y", "%m-%d-%y", "%m/%d/%y"]:
+                try:
+                    parsed = datetime.strptime(date_str, fmt)
+                    # Assume current century for 2-digit years
+                    if parsed.year < 100:
+                        parsed = parsed.replace(year=parsed.year + 2000)
+                    reset_date = parsed.date()
+                    break
+                except ValueError:
+                    continue
+            
+            if not reset_date:
+                await ctx.send(f"❌ Invalid date format: `{date_str}`. Use format like `3-26-2025` or `3/26/2025`")
+                return
+            
+            # Set to midnight ET on that date
+            reset_datetime = datetime.combine(reset_date, dt_time(0, 0, 0))
+            reset_datetime = reset_datetime.replace(tzinfo=ZoneInfo("America/New_York"))
+        except Exception as e:
+            await ctx.send(f"❌ Error parsing date: {e}")
+            return
+    else:
+        # Use today (default behavior)
+        reset_datetime = None
+    
     # Clear ALL existing data for this guild from the store
     old_keys = [k for k, r in store.results.items() if r["guild_id"] == gid]
     for k in old_keys:
         del store.results[k]
     
-    # Set the crown reset date to today
-    reset_date = store.reset_crowns(gid)
+    # Set the crown reset date
+    if reset_datetime:
+        store.crown_reset_dates[gid] = reset_datetime
+        formatted_date = reset_datetime.strftime("%B %d, %Y")
+        log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} to date {reset_datetime}, cleared {len(old_keys)} old entries")
+    else:
+        reset_datetime = store.reset_crowns(gid)
+        formatted_date = reset_datetime.strftime("%B %d, %Y")
+        log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} at {reset_datetime}, cleared {len(old_keys)} old entries")
     
-    # Format the date nicely
-    formatted_date = reset_date.strftime("%B %d, %Y")
-    
-    log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} at {reset_date}, cleared {len(old_keys)} old entries")
     await ctx.send(f"👑 **Crowns Reset**: Crown counts reset to 0!\n"
                    f"Cleared {len(old_keys)} old results.\n"
                    f"Crowns will now only count from **{formatted_date}** forward.")
@@ -1044,7 +1079,8 @@ async def cmd_help(ctx):
         f"`{PREFIX}crowns` — crown leaderboard (default: month)\n"
         f"`{PREFIX}crowns week` / `{PREFIX}crowns wordle`\n"
         f"`{PREFIX}mystats` / `{PREFIX}stats @user`\n"
-        f"`{PREFIX}resetcrowns confirm` — 👑 reset crown counts (admin only)"))
+        f"`{PREFIX}resetcrowns confirm` — 👑 reset crown counts (admin only)\n"
+        f"`{PREFIX}resetcrowns confirm 3-26-2025` — reset to specific date"))
     e.add_field(name="⚙️  Admin Commands", inline=False, value=(
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
         f"`{PREFIX}setchannel` — disable auto-post\n"
