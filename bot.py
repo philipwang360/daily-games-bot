@@ -823,8 +823,11 @@ async def cmd_links(ctx):
         
         # Check if this game awards crowns (use normalized name)
         normalized = _normalize_game_name(game_name)
-        if normalized in NO_CROWN_GAMES or normalized in SIMPLE_CROWN_GAMES:
+        if normalized in NO_CROWN_GAMES:
             no_crown_games.append(f"{icon} [{game_name}]({url})")
+        elif normalized in SIMPLE_CROWN_GAMES:
+            # Wordle - show in crowns section but without link (run by app)
+            crown_games.append(f"👑 {icon} {game_name}")
         else:
             crown_games.append(f"👑 {icon} [{game_name}]({url})")
     
