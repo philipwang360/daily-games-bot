@@ -821,8 +821,9 @@ async def cmd_links(ctx):
         meta = _GAME_META.get(game_name.lower(), {})
         icon = meta.get('icon', '🎮')
         
-        # Check if this game awards crowns
-        if game_name.lower() in NO_CROWN_GAMES or game_name.lower() in SIMPLE_CROWN_GAMES:
+        # Check if this game awards crowns (use normalized name)
+        normalized = _normalize_game_name(game_name)
+        if normalized in NO_CROWN_GAMES or normalized in SIMPLE_CROWN_GAMES:
             no_crown_games.append(f"{icon} [{game_name}]({url})")
         else:
             crown_games.append(f"👑 {icon} [{game_name}]({url})")
