@@ -81,7 +81,15 @@ class ResultsStore:
             log.info(f"Reconciled {updated} Wordle entries for {name} -> {user_id}")
     
     def get_user_id_from_name(self, guild_id: str, name: str) -> str:
-        """Get user ID from display name, or return name if not mapped"""
+        """Get user ID from display name, or return cleaned name if not mapped. 
+        Handles Discord mentions like <@123456789> by extracting the ID."""
+        # If it's already a mention format, extract the ID
+        if name.startswith('<@') and name.endswith('>'):
+            return name[2:-1]  # Remove <@ and >
+        if name.startswith('<@!') and name.endswith('>'):
+            return name[3:-1]  # Remove <@! and >
+        
+        # Otherwise look up in mapping
         return self.name_to_id.get((guild_id, name), name)
     
     def check_reset(self):
@@ -111,9 +119,8 @@ class ResultsStore:
     
     def save(self, guild_id: str, user_id: str, username: str, 
              game_result, date_str: str):
-    # Save with new format - use user_id consistently
+        """Save a result, overwriting any existing entry for same user/game/date"""
         key = (guild_id, user_id, game_result.game, date_str)
-        was_update = key in self.results
         self.results[key] = {
             "guild_id": guild_id,
             "user_id": user_id,
@@ -125,8 +132,6 @@ class ResultsStore:
             "puzzle_date": date_str,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
-        action = "Updated" if was_update else "Added"
-        log.info(f"{action} result: {username} ({user_id}) - {game_result.game} {game_result.display} on {date_str}")
     
     def fetch(self, guild_id: str, *, date=None, start=None, end=None, 
               game=None, uid=None):
@@ -635,10 +640,6 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     """Fetch message history and populate the store"""
     gid = str(channel.guild.id)
     
-    # Log current state
-    before_count = len([r for r in store.results.values() if r["guild_id"] == gid])
-    log.info(f"SYNC START: Guild {gid} has {before_count} results before sync")
-    
     if days == 1:
         now_et = datetime.now(ZoneInfo("America/New_York"))
         today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -675,12 +676,10 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
             # Check for Wordle group summary
             wordle_results = parse_wordle_group_summary(msg.content, msg.created_at)
             if wordle_results:
-                log.info(f"Found Wordle summary in message: {msg.content[:60]}")
                 for username, score, max_score, display, game_date in wordle_results:
                     result = GameResult("Wordle", score, max_score, display)
                     # Look up real user_id from name mapping
                     user_id = store.get_user_id_from_name(gid, username)
-                    log.info(f"Wordle result: {username} -> {user_id}")
                     store.save(gid, user_id, username, result, game_date)
                     result_count += 1
             else:
@@ -701,8 +700,7 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     except discord.HTTPException as e:
         log.error("Error fetching history: %s", e)
     
-    after_count = len([r for r in store.results.values() if r["guild_id"] == gid])
-    log.info(f"SYNC END: Guild {gid} has {after_count} results after sync (added {after_count - before_count})")
+    log.info(f"Synced {message_count} messages, found {result_count} game results")
     return result_count
 
 
@@ -764,10 +762,7 @@ async def on_message(msg: discord.Message):
                      msg_date, reset_date)
             return
     
-    # Log current store size for debugging
-    guild_results = len([r for r in store.results.values() if r["guild_id"] == gid])
-    log.info("MSG from %s: %s [store has %d results for this guild]", 
-             msg.author.display_name, msg.content[:80], guild_results)
+    log.info("MSG from %s: %s", msg.author.display_name, msg.content[:80])
      
     # Check for Wordle group summary
     wordle_results = parse_wordle_group_summary(msg.content, msg.created_at)
@@ -779,7 +774,6 @@ async def on_message(msg: discord.Message):
             # Look up real user_id from name mapping, or use name if not found
             user_id = store.get_user_id_from_name(gid, username)
             store.save(gid, user_id, username, result, game_date)
-            log.info("  📊  %s (id: %s)  ·  Wordle %s (date: %s)", username, user_id, display, game_date)
         await msg.add_reaction("📊")
     else:
         # Normal parsing for user messages
@@ -794,7 +788,6 @@ async def on_message(msg: discord.Message):
                 store.save(gid, uid, name, r, d)
                 # Also map this name to the user_id for future Wordle lookups
                 store.map_name_to_id(gid, name, uid)
-                log.info("  📊  %s  ·  %s %s", name, r.game, r.display)
             await msg.add_reaction("📊")
     
     try:
@@ -1209,52 +1202,57 @@ async def cmd_merge(ctx, source: str, target: str):
     source_clean = extract_id(source)
     target_clean = extract_id(target)
     
-    # Try to find source by ID, then by username patterns
+    # Also try with/without brackets
+    source_variants = [source_clean, f"<@{source_clean}>", f"<@!{source_clean}>"]
+    target_variants = [target_clean, f"<@{target_clean}>", f"<@!{target_clean}>"]
+    
+    # Try to find source by any variant
     source_keys = []
+    found_source_format = None
     
-    # First try exact match
-    source_keys = [k for k, r in store.results.items() 
-                   if r["guild_id"] == gid and r["user_id"] == source_clean]
-    
-    # If not found, try with @ prefix
-    if not source_keys and not source_clean.startswith('@'):
-        source_keys = [k for k, r in store.results.items() 
-                       if r["guild_id"] == gid and r["user_id"] == f"@{source_clean}"]
-    
-    # If still not found, try case-insensitive username match
-    if not source_keys:
-        source_keys = [k for k, r in store.results.items() 
-                       if r["guild_id"] == gid and r["username"].lower() == source_clean.lower().lstrip('@')]
+    for variant in source_variants:
+        keys = [k for k, r in store.results.items() 
+                if r["guild_id"] == gid and r["user_id"] == variant]
+        if keys:
+            source_keys = keys
+            found_source_format = variant
+            break
     
     if not source_keys:
-        # List available users for debugging
-        available_users = set()
+        # Show debug info
+        users = {}
         for r in store.results.values():
             if r["guild_id"] == gid:
-                available_users.add(f"`{r['user_id']}` ({r['username']})")
+                uid = r["user_id"]
+                name = r["username"]
+                if uid not in users:
+                    users[uid] = name
         
-        users_list = "\n".join(sorted(available_users)[:10]) if available_users else "No users found"
-        return await ctx.send(f"❌ No data found for user: `{source}` (tried: `{source_clean}`)\n\n"
-                             f"**Available users in this guild:**\n{users_list}\n\n"
-                             f"Tip: Use the exact user_id or username from the list above.")
+        lines = ["❌ No data found for user. **Available users:**"]
+        for uid, name in sorted(users.items())[:15]:
+            lines.append(f"• `{uid}` ({name})")
+        
+        return await ctx.send("\n".join(lines))
     
-    # Get target user's display name if available
+    # Find target
+    target_final = target_clean
     target_name = target_clean
-    for r in store.results.values():
-        if r["guild_id"] == gid:
-            if r["user_id"] == target_clean or r["user_id"] == f"@{target_clean}":
-                target_name = r["username"]
-                target_clean = r["user_id"]  # Use the stored ID format
-                break
     
-    # Merge source into target
+    for variant in target_variants:
+        for r in store.results.values():
+            if r["guild_id"] == gid and r["user_id"] == variant:
+                target_final = variant
+                target_name = r["username"]
+                break
+        if target_final != target_clean:
+            break
+    
+    # Merge
     merged = 0
     for key in source_keys:
         r = store.results[key]
-        # Create new key with target user_id
-        new_key = (gid, target_clean, r["game"], r["puzzle_date"])
+        new_key = (gid, target_final, r["game"], r["puzzle_date"])
         
-        # If target already has entry for this game/date, keep the better score
         if new_key in store.results:
             existing = store.results[new_key]
             meta = _GAME_META.get(r["game"].lower(), {})
@@ -1262,25 +1260,23 @@ async def cmd_merge(ctx, source: str, target: str):
             
             if low:
                 if r["score"] < existing["score"]:
-                    store.results[new_key] = {**r, "user_id": target_clean, "username": target_name}
+                    store.results[new_key] = {**r, "user_id": target_final, "username": target_name}
             else:
                 if r["score"] > existing["score"]:
-                    store.results[new_key] = {**r, "user_id": target_clean, "username": target_name}
+                    store.results[new_key] = {**r, "user_id": target_final, "username": target_name}
         else:
-            store.results[new_key] = {**r, "user_id": target_clean, "username": target_name}
+            store.results[new_key] = {**r, "user_id": target_final, "username": target_name}
         
         del store.results[key]
         merged += 1
     
-    # Create mapping
-    clean_source = source_clean.lstrip('@')
-    store.name_to_id[(gid, clean_source)] = target_clean
-    store.name_to_id[(gid, f"@{clean_source}")] = target_clean
-    store.name_to_id[(gid, source_clean)] = target_clean
+    # Create all mappings
+    for variant in source_variants:
+        store.name_to_id[(gid, variant)] = target_final
     
     await ctx.send(f"✅ **Merged {merged} entries**\n"
-                   f"• Source: `{source}` → `{source_clean}`\n"
-                   f"• Target: `{target}` → `{target_clean}` ({target_name})\n\n"
+                   f"• Source format: `{found_source_format}`\n"
+                   f"• Target: `{target_final}` ({target_name})\n\n"
                    f"Run `!zg crowns` to see updated leaderboard!")
 
 
