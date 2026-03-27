@@ -1165,6 +1165,33 @@ async def cmd_reconcile(ctx):
                    f"Duplicates should now be merged in crown leaderboard!")
 
 
+@bot.command(name="debug")
+@commands.has_permissions(manage_guild=True)
+async def cmd_debug(ctx):
+    """Debug command to see all users in the store"""
+    gid = str(ctx.guild.id)
+    
+    # Get all unique user_ids for this guild
+    users = {}
+    for r in store.results.values():
+        if r["guild_id"] == gid:
+            uid = r["user_id"]
+            name = r["username"]
+            if uid not in users:
+                users[uid] = {"name": name, "games": set()}
+            users[uid]["games"].add(r["game"])
+    
+    if not users:
+        return await ctx.send("No data found in store for this guild.")
+    
+    lines = ["**Users in store:**"]
+    for uid, data in sorted(users.items()):
+        games_list = ", ".join(sorted(data["games"]))
+        lines.append(f"• `{uid}` ({data['name']}) - {games_list}")
+    
+    await ctx.send("\n".join(lines[:20]))  # Limit to 20 users
+
+
 @bot.command(name="merge")
 @commands.has_permissions(manage_guild=True)
 async def cmd_merge(ctx, source: str, target: str):
