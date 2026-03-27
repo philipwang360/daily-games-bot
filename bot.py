@@ -386,6 +386,15 @@ def _framed(m):
     return score, 6, f"{score}/6"
 
 
+@game_parser("Birdle", r"USA\s+(?:Lower\s+48|World|UK)?\s*Birdle\s*\n(\d{4}-\d{2}-\d{2})\s*\n([🐦❌\n]+)",
+             lower_is_better=True, icon="🐦")
+def _birdle(m):
+    # Count the number of rows (lines with emojis)
+    grid_text = m.group(2).strip()
+    rows = len([line for line in grid_text.split('\n') if line.strip()])
+    return rows, 6, f"{rows}/6"
+
+
 @game_parser("Costcodle", r"Costcodle\s*#\d+\s+(\d)/6",
              lower_is_better=True, icon="🛒")
 def _costcodle(m):
@@ -409,10 +418,11 @@ GAME_LINKS = {
     "Doctordle": "https://doctordle.com/",
     "TimeGuessr": "https://timeguessr.com/",
     "Framed": "https://framed.wtf/",
-    "Costcodle": "https://costcodle.com/"
+    "Costcodle": "https://costcodle.com/",
+    "Birdle": "https://www.play-birdle.com/lower48/"
 }
 
-NO_CROWN_GAMES = {"doctordle", "loldle", "narutodle", "pokedle", "whentaken"}
+NO_CROWN_GAMES = {"doctordle", "loldle", "narutodle", "pokedle", "whentaken", "birdle"}
 
 # Games that count for crowns but don't show in the breakdown
 SIMPLE_CROWN_GAMES = {"wordle"}
