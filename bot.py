@@ -330,10 +330,10 @@ def _dialed(m):
     return s, 50, f"{s}/50"
 
 
-@game_parser("Catfishing", r"catfishing\.net\s*\n?\s*#?\d+\s*-\s*(\d+)/(\d+)",
+@game_parser("Catfishing", r"catfishing\.net\s*\n?\s*#?\d+\s*-\s*([\d.]+)/(\d+)",
              lower_is_better=False, icon="🐟")
 def _catfishing(m):
-    s, mx = int(m.group(1)), int(m.group(2))
+    s, mx = float(m.group(1)), int(m.group(2))
     return s, mx, f"{s}/{mx}"
 
 
@@ -820,12 +820,21 @@ async def cmd_sync(ctx, days: int = 30):
 
 @bot.command(name="links")
 async def cmd_links(ctx):
-    """Show all game links"""
-    lines = []
+    """Show all game links with crown info"""
+    crown_games = []
+    no_crown_games = []
+    
     for game_name, url in sorted(GAME_LINKS.items()):
         meta = _GAME_META.get(game_name.lower(), {})
         icon = meta.get('icon', '🎮')
-        lines.append(f"{icon} [{game_name}]({url})")
+        
+        # Check if this game awards crowns
+        if game_name.lower() in NO_CROWN_GAMES or game_name.lower() in SIMPLE_CROWN_GAMES:
+            no_crown_games.append(f"{icon} [{game_name}]({url})")
+        else:
+            crown_games.append(f"👑 {icon} [{game_name}]({url})")
+    
+    lines = ["**👑 Games Award Crowns:**"] + crown_games + ["", "**Games for Fun (No Crowns):**"] + no_crown_games
     
     embed = discord.Embed(
         title="🎮  Daily Games Links",
@@ -1156,6 +1165,80 @@ async def cmd_reconcile(ctx):
                    f"Duplicates should now be merged in crown leaderboard!")
 
 
+@bot.command(name="merge")
+@commands.has_permissions(manage_guild=True)
+async def cmd_merge(ctx, source: str, target: str):
+    """Manually merge two user entries (source -> target). Use Discord IDs or usernames."""
+    gid = str(ctx.guild.id)
+    
+    # Find all results for source user
+    source_keys = [k for k, r in store.results.items() 
+                   if r["guild_id"] == gid and r["user_id"] == source]
+    
+    if not source_keys:
+        return await ctx.send(f"❌ No data found for user: `{source}`")
+    
+    # Get target user's display name if available
+    target_name = target
+    for r in store.results.values():
+        if r["guild_id"] == gid and r["user_id"] == target:
+            target_name = r["username"]
+            break
+    
+    # Merge source into target
+    merged = 0
+    for key in source_keys:
+        r = store.results[key]
+        # Create new key with target user_id
+        new_key = (gid, target, r["game"], r["puzzle_date"])
+        
+        # If target already has entry for this game/date, keep the better score
+        if new_key in store.results:
+            existing = store.results[new_key]
+            # Compare scores (lower is better for some games)
+            meta = _GAME_META.get(r["game"].lower(), {})
+            low = meta.get("low", False)
+            
+            if low:
+                # Lower is better
+                if r["score"] < existing["score"]:
+                    store.results[new_key] = {
+                        **r,
+                        "user_id": target,
+                        "username": target_name
+                    }
+            else:
+                # Higher is better
+                if r["score"] > existing["score"]:
+                    store.results[new_key] = {
+                        **r,
+                        "user_id": target,
+                        "username": target_name
+                    }
+        else:
+            # No conflict, just move it
+            store.results[new_key] = {
+                **r,
+                "user_id": target,
+                "username": target_name
+            }
+        
+        # Delete old entry
+        del store.results[key]
+        merged += 1
+    
+    # Create mapping so future Wordle entries get attributed correctly
+    if source.startswith("@"):
+        clean_name = source[1:]
+        store.name_to_id[(gid, clean_name)] = target
+    store.name_to_id[(gid, source)] = target
+    
+    await ctx.send(f"✅ **Merged {merged} entries**\n"
+                   f"• Source: `{source}`\n"
+                   f"• Target: `{target}` ({target_name})\n\n"
+                   f"Run `!zg crowns` to see updated leaderboard!")
+
+
 @bot.command(name="setchannel")
 @commands.has_permissions(manage_guild=True)
 async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
@@ -1191,7 +1274,8 @@ async def cmd_help(ctx):
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
         f"`{PREFIX}setchannel` — disable auto-post\n"
         f"`{PREFIX}resetcrowns confirm` — reset crown competition\n"
-        f"`{PREFIX}reconcile` — merge duplicate Wordle entries (admin only)\n\n"
+        f"`{PREFIX}reconcile` — auto-merge duplicate entries\n"
+        f"`{PREFIX}merge @user1 user2_id` — manually merge duplicates\n\n"
         f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
     e.add_field(name="📚  Other Commands", inline=False, value=(
         f"`{PREFIX}games` — list supported games\n"
