@@ -83,8 +83,9 @@ class ResultsStore:
     
     def save(self, guild_id: str, user_id: str, username: str, 
              game_result, date_str: str):
-        """Save a result, overwriting any existing entry for same user/game/date"""
+    # Save with new format - use user_id consistently
         key = (guild_id, user_id, game_result.game, date_str)
+        was_update = key in self.results
         self.results[key] = {
             "guild_id": guild_id,
             "user_id": user_id,
@@ -96,6 +97,8 @@ class ResultsStore:
             "puzzle_date": date_str,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
+        action = "Updated" if was_update else "Added"
+        log.info(f"{action} result: {username} ({user_id}) - {game_result.game} {game_result.display} on {date_str}")
     
     def fetch(self, guild_id: str, *, date=None, start=None, end=None, 
               game=None, uid=None):
@@ -253,12 +256,12 @@ def parse_wordle_group_summary(text: str, msg_created_at=None) -> list[tuple]:
                 # Clean up trailing punctuation
                 username = username.strip('.,!?;:')
                 
-                # Skip empty, hashtags, or markdown
-                if username and not username.startswith('#') and username != '**':
+                # Skip empty, hashtags, markdown, or single punctuation
+                if username and len(username) > 1 and not username.startswith('#') and username != '**':
                     users.append(username)
             
             for username in users:
-                if username:
+                if username and len(username) > 1:
                     results.append((username, score, max_score, display, game_date.isoformat()))
     
     return results
@@ -601,6 +604,10 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     """Fetch message history and populate the store"""
     gid = str(channel.guild.id)
     
+    # Log current state
+    before_count = len([r for r in store.results.values() if r["guild_id"] == gid])
+    log.info(f"SYNC START: Guild {gid} has {before_count} results before sync")
+    
     if days == 1:
         now_et = datetime.now(ZoneInfo("America/New_York"))
         today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -637,10 +644,12 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
             # Check for Wordle group summary
             wordle_results = parse_wordle_group_summary(msg.content, msg.created_at)
             if wordle_results:
+                log.info(f"Found Wordle summary in message: {msg.content[:60]}")
                 for username, score, max_score, display, game_date in wordle_results:
                     result = GameResult("Wordle", score, max_score, display)
                     # Look up real user_id from name mapping
                     user_id = store.get_user_id_from_name(gid, username)
+                    log.info(f"Wordle result: {username} -> {user_id}")
                     store.save(gid, user_id, username, result, game_date)
                     result_count += 1
             else:
@@ -660,7 +669,8 @@ async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
     except discord.HTTPException as e:
         log.error("Error fetching history: %s", e)
     
-    log.info(f"Synced {message_count} messages, found {result_count} game results")
+    after_count = len([r for r in store.results.values() if r["guild_id"] == gid])
+    log.info(f"SYNC END: Guild {gid} has {after_count} results after sync (added {after_count - before_count})")
     return result_count
 
 
@@ -722,7 +732,10 @@ async def on_message(msg: discord.Message):
                      msg_date, reset_date)
             return
     
-    log.info("MSG from %s: %s", msg.author.display_name, msg.content[:80])
+    # Log current store size for debugging
+    guild_results = len([r for r in store.results.values() if r["guild_id"] == gid])
+    log.info("MSG from %s: %s [store has %d results for this guild]", 
+             msg.author.display_name, msg.content[:80], guild_results)
      
     # Check for Wordle group summary
     wordle_results = parse_wordle_group_summary(msg.content, msg.created_at)
