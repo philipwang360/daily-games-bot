@@ -4,7 +4,7 @@ Zaily Games Leaderboard Bot for Discord — Message History Edition
 Monthly reset to prevent backlog accumulation
 """
 
-import re, os, logging, asyncio
+import re, os, logging, asyncio, unicodedata
 from datetime import datetime, timedelta, timezone, time as dt_time
 from collections import defaultdict
 from typing import Optional
@@ -24,8 +24,8 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════
 
 TOKEN      = os.getenv("DAILY_GAMES_BOT_TOKEN")
-PREFIX     = os.getenv("BOT_PREFIX", "!zgb ")
-RESET_DAY  = int(os.getenv("RESET_DAY", "1"))  # Day of month to reset (default: 1st)
+PREFIX     = "!zg "
+RESET_DAY  = int(os.getenv("RESET_DAY", "1"))
 
 log = logging.getLogger("zailygames")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
@@ -38,12 +38,59 @@ MEDALS = ["🥇", "🥈", "🥉"]
 # ═══════════════════════════════════════════════════════════════════
 
 class ResultsStore:
-    """In-memory storage with monthly reset"""
+    """In-memory storage with monthly reset and crown tracking"""
     
     def __init__(self):
-        # Structure: {(guild_id, user_id, game, date): GameResult}
         self.results: dict[tuple, dict] = {}
         self.current_month: int = datetime.now(timezone.utc).month
+        # Track crown reset dates per guild: {guild_id: datetime}
+        self.crown_reset_dates: dict[str, datetime] = {}
+        # Map display_name -> user_id for each guild to handle Wordle summaries
+        self.name_to_id: dict[tuple[str, str], str] = {}
+    
+    def map_name_to_id(self, guild_id: str, name: str, user_id: str):
+        """Map a display name to a user ID for consistent identification"""
+        self.name_to_id[(guild_id, name)] = user_id
+        # Also reconcile any existing Wordle entries with this name
+        self._reconcile_wordle_entries(guild_id, name, user_id)
+    
+    def _reconcile_wordle_entries(self, guild_id: str, name: str, user_id: str):
+        """Update existing Wordle entries to use the correct user_id"""
+        updated = 0
+        keys_to_update = []
+        
+        for key, r in self.results.items():
+            if (r["guild_id"] == guild_id and 
+                r["game"] == "Wordle" and 
+                r["user_id"] == name and  # Currently stored with name as ID
+                r["username"] == name):
+                # Found a Wordle entry that needs updating
+                keys_to_update.append(key)
+        
+        for old_key in keys_to_update:
+            r = self.results[old_key]
+            # Create new key with correct user_id
+            new_key = (guild_id, user_id, r["game"], r["puzzle_date"])
+            # Update the record
+            r["user_id"] = user_id
+            self.results[new_key] = r
+            del self.results[old_key]
+            updated += 1
+        
+        if updated > 0:
+            log.info(f"Reconciled {updated} Wordle entries for {name} -> {user_id}")
+    
+    def get_user_id_from_name(self, guild_id: str, name: str) -> str:
+        """Get user ID from display name, or return cleaned name if not mapped. 
+        Handles Discord mentions like <@123456789> by extracting the ID."""
+        # If it's already a mention format, extract the ID
+        if name.startswith('<@') and name.endswith('>'):
+            return name[2:-1]  # Remove <@ and >
+        if name.startswith('<@!') and name.endswith('>'):
+            return name[3:-1]  # Remove <@! and >
+        
+        # Otherwise look up in mapping
+        return self.name_to_id.get((guild_id, name), name)
     
     def check_reset(self):
         """Reset storage if we've entered a new month"""
@@ -56,6 +103,19 @@ class ResultsStore:
                      len(self.results), old_month)
             return True
         return False
+    
+    def reset_crowns(self, guild_id: str):
+        """Reset crown count for a guild - crowns will only count from today forward (not exact time)"""
+        # Use today's date in Eastern Time (midnight), not exact timestamp
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        self.crown_reset_dates[guild_id] = today_start_et
+        log.info(f"👑 Crowns reset for guild {guild_id} at {today_start_et} (all games from today count)")
+        return today_start_et
+    
+    def get_crown_reset_date(self, guild_id: str) -> Optional[datetime]:
+        """Get the crown reset date for a guild, or None if never reset"""
+        return self.crown_reset_dates.get(guild_id)
     
     def save(self, guild_id: str, user_id: str, username: str, 
              game_result, date_str: str):
@@ -91,7 +151,6 @@ class ResultsStore:
             if uid and r["user_id"] != uid:
                 continue
             rows.append(r)
-        # Sort by date desc, game, score
         meta_low = {p["name"].lower(): p["low"] for p in _PARSERS}
         rows.sort(key=lambda r: (
             r["puzzle_date"], 
@@ -105,7 +164,6 @@ class ResultsStore:
         return [r for r in self.results.values() if r["guild_id"] == guild_id]
 
 
-# Global storage instance
 store = ResultsStore()
 
 
@@ -127,10 +185,10 @@ class GameResult:
 
 
 def game_parser(name: str, pattern: str, *,
-                lower_is_better: bool = False, icon: str = "🎮", url: str = ""):
+                lower_is_better: bool = False, icon: str = "🎮"):
     compiled = re.compile(pattern, re.DOTALL | re.IGNORECASE)
     def deco(fn):
-        entry = dict(name=name, pat=compiled, fn=fn, low=lower_is_better, icon=icon, url=url)
+        entry = dict(name=name, pat=compiled, fn=fn, low=lower_is_better, icon=icon)
         _PARSERS.append(entry)
         _GAME_META[name.lower()] = entry
         return fn
@@ -166,7 +224,7 @@ def _match_game(query: str) -> Optional[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  GAME PARSERS — ADD NEW GAMES HERE
+#  GAME PARSERS
 # ═══════════════════════════════════════════════════════════════════
 
 @game_parser("Wordle", r"Wordle\s+[\d,]+\s+([X\d])/6",
@@ -178,6 +236,70 @@ def _wordle(m):
     return int(v), 6, f"{v}/6"
 
 
+def parse_wordle_group_summary(text: str, msg_created_at=None) -> list[tuple]:
+    """
+    Parse Wordle group summary messages.
+    Returns list of (username, score, max_score, display, game_date) tuples
+    """
+    # Check if this is a group summary message
+    is_summary = "yesterday's results" in text.lower() or "today's results" in text.lower()
+    
+    if not is_summary:
+        return []
+    
+    # Use the message date as the game date
+    if msg_created_at:
+        game_date = msg_created_at.astimezone(ZoneInfo("America/New_York")).date()
+    else:
+        game_date = datetime.now(ZoneInfo("America/New_York")).date()
+    
+    results = []
+    # Pattern: optional 👑, then score/X: followed by names
+    pattern = r'(?:👑\s*)?(\d|X)/(\d+):\s*(.+)'
+    
+    for line in text.split('\n'):
+        match = re.search(pattern, line.strip())
+        if match:
+            score_str = match.group(1).upper()
+            max_score = int(match.group(2))
+            names_part = match.group(3)
+            
+            if score_str == "X":
+                score = 7
+            else:
+                score = int(score_str)
+            
+            display = f"{score_str}/{max_score}"
+            
+            # Extract usernames - remove hashtags first, then get all @mentions and names
+            names_clean = re.sub(r'#\S+', '', names_part).strip()
+            users = []
+            
+            for part in names_clean.split():
+                part = part.strip()
+                if not part:
+                    continue
+                    
+                # Remove @ prefix if present
+                if part.startswith('@'):
+                    username = part[1:]
+                else:
+                    username = part
+                
+                # Clean up trailing punctuation
+                username = username.strip('.,!?;:')
+                
+                # Skip empty, hashtags, markdown, or single punctuation
+                if username and len(username) > 1 and not username.startswith('#') and username != '**':
+                    users.append(username)
+            
+            for username in users:
+                if username and len(username) > 1:
+                    results.append((username, score, max_score, display, game_date.isoformat()))
+    
+    return results
+
+
 @game_parser("Pokédle", r"#Pokédle[\s\S]*?in\s+(\d+)\s+shots?",
              lower_is_better=True, icon="⚔️")
 def _pokedle(m):
@@ -185,14 +307,10 @@ def _pokedle(m):
     return s, 8, f"{s} shots"
 
 
-_WORD_NUMS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-              "six": 6, "seven": 7, "eight": 8}
-
-@game_parser("LoLdle", r"#LoLdle[\s\S]*?in\s+(one|two|three|four|five|six|seven|eight|\d+)\s+shots?",
+@game_parser("LoLdle", r"#LoLdle[\s\S]*?in\s+(\d+)\s+shots?",
              lower_is_better=True, icon="🎮")
 def _loldle(m):
-    raw = m.group(1).lower()
-    s = _WORD_NUMS[raw] if raw in _WORD_NUMS else int(raw)
+    s = int(m.group(1))
     return s, 8, f"{s} shots"
 
 
@@ -217,10 +335,10 @@ def _dialed(m):
     return s, 50, f"{s}/50"
 
 
-@game_parser("Catfishing", r"catfishing\.net\s*\n?\s*#?\d+\s*-\s*(\d+)/(\d+)",
+@game_parser("Catfishing", r"catfishing\.net\s*\n?\s*#?\d+\s*-\s*([\d.]+)/(\d+)",
              lower_is_better=False, icon="🐟")
 def _catfishing(m):
-    s, mx = int(m.group(1)), int(m.group(2))
+    s, mx = float(m.group(1)), int(m.group(2))
     return s, mx, f"{s}/{mx}"
 
 
@@ -232,7 +350,7 @@ def _feudle(m):
 
 
 @game_parser("Doctordle", r"Doctordle\s*#\d+\s*\n([^\n]+)",
-             icon="🏥", url="https://doctordle.org/")
+             icon="🏥")
 def _doctordle(m):
     line = m.group(1)
     g = line.count("🟩")
@@ -252,80 +370,111 @@ def _timeguessr(m):
     return s, mx, f"{s:,}/{mx:,}"
 
 
+@game_parser("Framed", r"Framed\s*#(\d+)\s*\n([🎥🟥🟩⬛\s]+)",
+             lower_is_better=True, icon="🎬")
+def _framed(m):
+    line = m.group(2).strip()
+    green = line.count("🟩")
+    if green == 0:
+        score = 7
+    else:
+        squares = [c for c in line if c in ["🟥", "🟩", "⬛"]]
+        try:
+            score = squares.index("🟩") + 1
+        except ValueError:
+            score = 7
+    return score, 6, f"{score}/6"
+
+
+@game_parser("Birdle", r"USA\s+(?:Lower\s+48|World|UK)?\s*Birdle\s*\n(\d{4}-\d{2}-\d{2})\s*\n([🐦❌\n]+)",
+             lower_is_better=True, icon="🐦")
+def _birdle(m):
+    # Parse the grid
+    grid_text = m.group(2).strip()
+    rows = [line.strip() for line in grid_text.split('\n') if line.strip()]
+    
+    # Check if they succeeded (any row with all 🐦, no ❌)
+    succeeded = False
+    success_row = 0
+    
+    for i, row in enumerate(rows, 1):
+        if '❌' not in row and len(row) >= 4:
+            # Row has no X's and at least 4 emojis - success!
+            succeeded = True
+            success_row = i
+            break
+    
+    if succeeded:
+        # Return the row number where they succeeded
+        return success_row, 6, f"{success_row}/6"
+    else:
+        # Failed - return X/6 or 7/6 (like Wordle)
+        return 7, 6, "X/6"
+
+
+@game_parser("Costcodle", r"Costcodle\s*#\d+\s+(\d)/6",
+             lower_is_better=True, icon="🛒")
+def _costcodle(m):
+    s = int(m.group(1))
+    return s, 6, f"{s}/6"
+
+
 # ═══════════════════════════════════════════════════════════════════
-#  MESSAGE HISTORY FETCHING
+#  GAME LINKS
 # ═══════════════════════════════════════════════════════════════════
 
-async def fetch_message_history(channel: discord.TextChannel, 
-                                after: Optional[datetime] = None,
-                                limit: int = 1000) -> list[discord.Message]:
-    """Fetch messages from channel history"""
-    messages = []
-    try:
-        # Discord.py handles pagination automatically
-        async for msg in channel.history(limit=limit, after=after, oldest_first=False):
-            messages.append(msg)
-    except discord.HTTPException as e:
-        log.error("Error fetching history: %s", e)
-    return messages
+GAME_LINKS = {
+    "Wordle": "https://www.nytimes.com/games/wordle/index.html",
+    "Pokédle": "https://pokedle.net/",
+    "LoLdle": "https://loldle.net/",
+    "Narutodle": "https://narutodle.net/",
+    "WhenTaken": "https://whentaken.com/",
+    "Dialed": "https://dialed.gg/",
+    "Catfishing": "https://catfishing.net/",
+    "Feudle": "https://feudlegame.com/",
+    "Doctordle": "https://doctordle.com/",
+    "TimeGuessr": "https://timeguessr.com/",
+    "Framed": "https://framed.wtf/",
+    "Costcodle": "https://costcodle.com/",
+    "Birdle": "https://www.play-birdle.com/lower48/"
+}
 
+NO_CROWN_GAMES = {"doctordle", "loldle", "narutodle", "pokedle", "whentaken", "birdle"}
 
-async def build_results_from_history(channel: discord.TextChannel,
-                                      days: int = 30) -> list[dict]:
-    """Build results list by fetching and parsing message history"""
-    after = datetime.now(timezone.utc) - timedelta(days=days)
-    messages = await fetch_message_history(channel, after=after)
-    
-    results = []
-    for msg in messages:
-        if msg.author.bot:
-            continue
-        
-        game_results = parse_message(msg.content)
-        if game_results:
-            date_str = msg.created_at.strftime("%Y-%m-%d")
-            for gr in game_results:
-                results.append({
-                    "guild_id": str(channel.guild.id),
-                    "user_id": str(msg.author.id),
-                    "username": msg.author.display_name,
-                    "game": gr.game,
-                    "score": gr.score,
-                    "max_score": gr.max_score,
-                    "display": gr.display,
-                    "puzzle_date": date_str,
-                    "created_at": msg.created_at.isoformat(),
-                    "message_id": msg.id
-                })
-    
-    return results
-
-
-def deduplicate_results(results: list[dict]) -> list[dict]:
-    """Keep only the latest result for each user/game/date combination"""
-    # Sort by created_at descending
-    sorted_results = sorted(results, 
-                          key=lambda r: r.get("created_at", ""), 
-                          reverse=True)
-    
-    seen = set()
-    unique = []
-    for r in sorted_results:
-        key = (r["guild_id"], r["user_id"], r["game"], r["puzzle_date"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(r)
-    
-    return unique
+# Games that count for crowns but don't show in the breakdown
+SIMPLE_CROWN_GAMES = {"wordle"}
 
 
 # ═══════════════════════════════════════════════════════════════════
 #  SCORING HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
-def _compute_crowns(rows):
+def _normalize_game_name(name: str) -> str:
+    """Normalize game name by removing accents and lowercasing"""
+    normalized = unicodedata.normalize('NFKD', name)
+    return ''.join(c for c in normalized if not unicodedata.combining(c)).lower()
+
+
+def _compute_crowns(rows, guild_id: str = ""):
     by_gd: dict[tuple, list] = defaultdict(list)
+    
+    # Get crown reset date for this guild
+    crown_reset_date = store.get_crown_reset_date(guild_id) if guild_id else None
+    
     for r in rows:
+        normalized_name = _normalize_game_name(r["game"])
+        if normalized_name in NO_CROWN_GAMES:
+            continue
+        if r["score"] > r["max_score"]:
+            continue
+        
+        # Skip results before crown reset date
+        if crown_reset_date:
+            result_date = datetime.strptime(r["puzzle_date"], "%Y-%m-%d").date()
+            reset_date = crown_reset_date.date()
+            if result_date < reset_date:
+                continue
+            
         by_gd[(r["game"], r["puzzle_date"])].append(r)
 
     user_crowns:   dict[tuple, int]       = defaultdict(int)
@@ -392,18 +541,26 @@ def _build_daily_embed(title, rows):
         ranked = _rank_items(gr, key=lambda r: r["score"],
                              reverse=(not low))
         best_score = ranked[0][2]["score"] if ranked else None
+        best_max_score = ranked[0][2]["max_score"] if ranked else None
+        all_failed = best_score > best_max_score if best_score and best_max_score else False
 
         lines = []
         for _rank, medal, r in ranked:
-            crown = " 👑" if r["score"] == best_score and len(gr) > 1 else ""
+            crown = " 👑" if (r["score"] == best_score and len(gr) > 1 and not all_failed) else ""
             lines.append(f"{medal} **{r['username']}** — {r['display']}{crown}")
 
-        embed.add_field(name=f"{icon}  {game_name}",
+        field_name = f"{icon}  {game_name}"
+        if low:
+            field_name += " (lower is better)"
+        else:
+            field_name += " (higher is better)"
+            
+        embed.add_field(name=field_name,
                         value="\n".join(lines), inline=False)
     return embed
 
 
-def _build_period_embed(title, rows, *, show_detail=False):
+def _build_period_embed(title, rows, *, show_detail=False, guild_id: str = ""):
     by_game: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     for r in rows:
         by_game[r["game"]][r["user_id"]].append(r)
@@ -414,7 +571,7 @@ def _build_period_embed(title, rows, *, show_detail=False):
         embed.description = "No results for this period!"
         return embed
 
-    user_crowns, daily_winners = _compute_crowns(rows)
+    user_crowns, daily_winners = _compute_crowns(rows, guild_id)
 
     for game_name in sorted(by_game):
         users = by_game[game_name]
@@ -458,14 +615,18 @@ def _build_period_embed(title, rows, *, show_detail=False):
                         f"{lbl}: {r['display']}{' 👑' if won else ''}")
                 lines.append(f"╰ {' · '.join(day_parts)}")
 
-        embed.add_field(name=f"{icon}  {game_name}",
+        field_name = f"{icon}  {game_name}"
+        if low:
+            field_name += " (lower is better)"
+        else:
+            field_name += " (higher is better)"
+            
+        embed.add_field(name=field_name,
                         value="\n".join(lines) or "—", inline=False)
     return embed
 
 
 def _add_streaks(embed, rows):
-    """Calculate and add streaks section to embed"""
-    # Filter to last 90 days
     cutoff = (datetime.now(timezone.utc).date() - timedelta(days=90)).isoformat()
     recent_rows = [r for r in rows if r["puzzle_date"] >= cutoff]
     
@@ -499,6 +660,78 @@ def _add_streaks(embed, rows):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  HISTORY SYNC
+# ═══════════════════════════════════════════════════════════════════
+
+async def sync_history_to_store(channel: discord.TextChannel, days: int = 30):
+    """Fetch message history and populate the store"""
+    gid = str(channel.guild.id)
+    
+    if days == 1:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        after = today_start_et.astimezone(timezone.utc)
+    else:
+        after = datetime.now(timezone.utc) - timedelta(days=days)
+    
+    # Check crown reset date - only fetch from after reset
+    crown_reset_date = store.get_crown_reset_date(gid)
+    if crown_reset_date:
+        reset_utc = crown_reset_date.astimezone(timezone.utc)
+        if reset_utc > after:
+            after = reset_utc
+            log.info(f"Using crown reset date {after} as fetch cutoff")
+    
+    message_count = 0
+    result_count = 0
+    
+    try:
+        async for msg in channel.history(limit=2000, after=after, oldest_first=False):
+            # Skip bot messages except Wordle app
+            author_name = msg.author.name.lower()
+            is_wordle_bot = msg.author.bot and ("wordle" in author_name or author_name.startswith("wordle"))
+            if msg.author.bot and not is_wordle_bot:
+                continue
+            
+            # Skip messages before crown reset date
+            if crown_reset_date:
+                msg_date = msg.created_at.astimezone(ZoneInfo("America/New_York")).date()
+                reset_date = crown_reset_date.date()
+                if msg_date < reset_date:
+                    continue
+            
+            # Check for Wordle group summary
+            wordle_results = parse_wordle_group_summary(msg.content, msg.created_at)
+            if wordle_results:
+                for username, score, max_score, display, game_date in wordle_results:
+                    result = GameResult("Wordle", score, max_score, display)
+                    # Look up real user_id from name mapping
+                    user_id = store.get_user_id_from_name(gid, username)
+                    store.save(gid, user_id, username, result, game_date)
+                    result_count += 1
+            else:
+                # Normal parsing
+                results = parse_message(msg.content)
+                if results:
+                    # Convert to Eastern Time for consistent date handling
+                    date_str = msg.created_at.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+                    uid = str(msg.author.id)
+                    name = msg.author.display_name
+                    
+                    for r in results:
+                        store.save(gid, uid, name, r, date_str)
+                        # Map name to user_id for Wordle lookups
+                        store.map_name_to_id(gid, name, uid)
+                        result_count += 1
+            message_count += 1
+    except discord.HTTPException as e:
+        log.error("Error fetching history: %s", e)
+    
+    log.info(f"Synced {message_count} messages, found {result_count} game results")
+    return result_count
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  DISCORD BOT
 # ═══════════════════════════════════════════════════════════════════
 
@@ -507,13 +740,11 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-# Store for configured channels (in-memory only now)
-config_store: dict[str, Optional[int]] = {}  # guild_id -> channel_id
+config_store: dict[str, Optional[int]] = {}
 
 
 @bot.event
 async def on_ready():
-    # Check for monthly reset
     if store.check_reset():
         log.info("🗑️  Monthly storage reset performed")
     
@@ -521,6 +752,8 @@ async def on_ready():
         daily_summary.start()
     if not monthly_reset_check.is_running():
         monthly_reset_check.start()
+    if not daily_links.is_running():
+        daily_links.start()
     
     cmds = [c.name for c in bot.commands]
     log.info("✅  %s online  ·  tracking %d games  ·  prefix: '%s'  ·  commands: %s", 
@@ -534,46 +767,60 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_message(msg: discord.Message):
-    if msg.author.bot or not msg.guild:
+    if not msg.guild:
         return
     
-    # Check for monthly reset when processing messages
+    # Allow Wordle bot messages for group summaries
+    author_name = msg.author.name.lower()
+    is_wordle_bot = msg.author.bot and ("wordle" in author_name or author_name.startswith("wordle"))
+    if msg.author.bot and not is_wordle_bot:
+        return
+    
     store.check_reset()
     
+    # Check if message is before crown reset date - don't save old data
+    gid = str(msg.guild.id)
+    crown_reset_date = store.get_crown_reset_date(gid)
+    if crown_reset_date:
+        msg_date = msg.created_at.astimezone(ZoneInfo("America/New_York")).date()
+        reset_date = crown_reset_date.date()
+        if msg_date < reset_date:
+            log.info("Skipping old message from %s (before crown reset %s)", 
+                     msg_date, reset_date)
+            return
+    
     log.info("MSG from %s: %s", msg.author.display_name, msg.content[:80])
-    results = parse_message(msg.content)
-    if results:
-        d    = msg.created_at.strftime("%Y-%m-%d")
-        gid  = str(msg.guild.id)
-        uid  = str(msg.author.id)
-        name = msg.author.display_name
-        for r in results:
-            store.save(gid, uid, name, r, d)
-            log.info("  📊  %s  ·  %s %s", name, r.game, r.display)
+     
+    # Check for Wordle group summary
+    wordle_results = parse_wordle_group_summary(msg.content, msg.created_at)
+    if wordle_results:
+        gid = str(msg.guild.id)
+        for username, score, max_score, display, game_date in wordle_results:
+            # Create a GameResult
+            result = GameResult("Wordle", score, max_score, display)
+            # Look up real user_id from name mapping, or use name if not found
+            user_id = store.get_user_id_from_name(gid, username)
+            store.save(gid, user_id, username, result, game_date)
         await msg.add_reaction("📊")
+    else:
+        # Normal parsing for user messages
+        results = parse_message(msg.content)
+        if results:
+            # Convert to Eastern Time for consistent date handling
+            d = msg.created_at.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+            gid  = str(msg.guild.id)
+            uid  = str(msg.author.id)
+            name = msg.author.display_name
+            for r in results:
+                store.save(gid, uid, name, r, d)
+                # Also map this name to the user_id for future Wordle lookups
+                store.map_name_to_id(gid, name, uid)
+            await msg.add_reaction("📊")
     
     try:
         await bot.process_commands(msg)
     except Exception as e:
         log.info("COMMAND ERROR: %s", e)
-
-
-@bot.event
-async def on_message_edit(_before, after: discord.Message):
-    if after.author.bot or not after.guild:
-        return
-    
-    # Check for monthly reset
-    store.check_reset()
-    
-    results = parse_message(after.content)
-    if results:
-        d    = after.created_at.strftime("%Y-%m-%d")
-        gid  = str(after.guild.id)
-        uid  = str(after.author.id)
-        name = after.author.display_name
-        for r in results:
-            store.save(gid, uid, name, r, d)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -583,10 +830,49 @@ async def on_message_edit(_before, after: discord.Message):
 PERIODS = {"today", "yesterday", "yday", "week", "month", "all"}
 
 
+@bot.command(name="sync")
+async def cmd_sync(ctx, days: int = 30):
+    """Manually sync message history"""
+    await ctx.send(f"🔄 Syncing last {days} days...")
+    count = await sync_history_to_store(ctx.channel, days)
+    await ctx.send(f"✅ Found {count} game results!")
+
+
+@bot.command(name="links")
+async def cmd_links(ctx):
+    """Show all game links with crown info"""
+    crown_games = []
+    no_crown_games = []
+    
+    for game_name, url in sorted(GAME_LINKS.items()):
+        meta = _GAME_META.get(game_name.lower(), {})
+        icon = meta.get('icon', '🎮')
+        
+        # Check if this game awards crowns (use normalized name)
+        normalized = _normalize_game_name(game_name)
+        if normalized in NO_CROWN_GAMES:
+            no_crown_games.append(f"{icon} [{game_name}]({url})")
+        elif normalized in SIMPLE_CROWN_GAMES:
+            # Wordle - show in crowns section but without link (run by app)
+            crown_games.append(f"👑 {icon} {game_name}")
+        else:
+            crown_games.append(f"👑 {icon} [{game_name}]({url})")
+    
+    lines = ["**👑 Games Award Crowns:**"] + crown_games + ["", "**Games for Fun (No Crowns):**"] + no_crown_games
+    
+    embed = discord.Embed(
+        title="🎮  Daily Games Links",
+        description="\n".join(lines),
+        color=0x5865F2,
+        timestamp=datetime.now(timezone.utc)
+    )
+    await ctx.send(embed=embed)
+
+
 @bot.command(name="lb", aliases=["leaderboard"])
 async def cmd_lb(ctx, *, args: str = "today"):
     gid   = str(ctx.guild.id)
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
 
     parts = args.split(maxsplit=1)
     first = parts[0].lower()
@@ -629,7 +915,9 @@ async def cmd_lb(ctx, *, args: str = "today"):
         meta = _GAME_META.get(game_name.lower(), {})
         title += f"  ·  {meta.get('icon','🎮')} {game_name}"
 
-    # Fetch from in-memory store
+    if single_day and isinstance(ctx.channel, discord.TextChannel):
+        await sync_history_to_store(ctx.channel, days=1)
+    
     rows = store.fetch(gid, **kw)
 
     if single_day:
@@ -639,7 +927,6 @@ async def cmd_lb(ctx, *, args: str = "today"):
         embed = _build_period_embed(title, rows, show_detail=show_detail)
 
     if single_day and not game_name:
-        # Get all rows for streak calculation
         all_rows = store.get_all(gid)
         _add_streaks(embed, all_rows)
 
@@ -651,8 +938,7 @@ async def cmd_games(ctx):
     lines = []
     for p in sorted(_PARSERS, key=lambda p: p["name"]):
         d = "fewer = better" if p["low"] else "higher = better"
-        name = f"[{p['name']}]({p['url']})" if p.get("url") else p["name"]
-        lines.append(f"{p['icon']}  **{name}** — {d}")
+        lines.append(f"{p['icon']}  **{p['name']}** — {d}")
     e = discord.Embed(title="🎲  Supported Games", color=0x57F287,
                       description="\n".join(lines))
     e.set_footer(text="Paste a game's share text and I'll track it automatically!")
@@ -665,14 +951,12 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     gid    = str(ctx.guild.id)
     uid    = str(target.id)
     
-    # Fetch from in-memory store
     rows = store.fetch(gid, uid=uid)
     if not rows:
-        return await ctx.send(
-            f"No results for **{target.display_name}** yet.")
+        return await ctx.send(f"No results for **{target.display_name}** yet.")
 
     all_rows      = store.get_all(gid)
-    crowns_map, _ = _compute_crowns(all_rows)
+    crowns_map, _ = _compute_crowns(all_rows, gid)
 
     by_game: dict[str, list] = defaultdict(list)
     for r in rows:
@@ -703,22 +987,24 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
 
         avg_s   = _fmt_avg(avg, mx)
         crown_s = f" · 👑 {c}" if c else ""
+        direction = "lower=better" if low else "higher=better"
+        
         e.add_field(
-            name=f"{icon}  {gn}",
+            name=f"{icon}  {gn}  ({direction})",
             value=(f"Avg **{avg_s}** · Best **{best_d}** · "
                    f"{len(gr)} plays{crown_s}"),
             inline=False)
 
     dates = set(r["puzzle_date"] for r in rows)
     e.description = (f"**{total_plays}** plays across **{len(dates)}** days "
-                     f"· **{total_crowns}** 👑 total")
+                   f"· **{total_crowns}** 👑 total")
     await ctx.send(embed=e)
 
 
 @bot.command(name="crowns")
-async def cmd_crowns(ctx, *, args: str = "all"):
+async def cmd_crowns(ctx, *, args: str = "month"):
     gid   = str(ctx.guild.id)
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
 
     parts = args.split(maxsplit=1)
     first = parts[0].lower()
@@ -726,12 +1012,9 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     if first in PERIODS:
         period     = first
         game_query = parts[1].strip() if len(parts) > 1 else None
-    elif first == "all":
-        period     = "all"
-        game_query = None
     else:
-        period     = "all"
-        game_query = args.strip()
+        period     = "month"
+        game_query = args.strip() if args.strip() not in PERIODS else None
 
     game_name = _match_game(game_query) if game_query else None
 
@@ -749,9 +1032,13 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     if game_name:
         kw["game"] = game_name
 
-    # Fetch from in-memory store
+    if isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("🔄 Fetching leaderboard history...", delete_after=3)
+        days_to_sync = 1 if period == "today" else (7 if period == "week" else 30)
+        await sync_history_to_store(ctx.channel, days=days_to_sync)
+    
     rows = store.fetch(gid, **kw)
-    crowns_map, _ = _compute_crowns(rows)
+    crowns_map, _ = _compute_crowns(rows, gid)
 
     names: dict[str, str] = {}
     for r in rows:
@@ -771,7 +1058,7 @@ async def cmd_crowns(ctx, *, args: str = "all"):
     if game_name:
         meta = _GAME_META.get(game_name.lower(), {})
         title += f" · {meta.get('icon','🎮')} {game_name}"
-    if period != "all":
+    if period != "month":
         title += f" · {period.title()}"
 
     e = discord.Embed(title=title, color=0xFFD700,
@@ -782,16 +1069,255 @@ async def cmd_crowns(ctx, *, args: str = "all"):
 
     lines = []
     for _rank, medal, (uid, data) in ranked[:15]:
-        breakdown = " · ".join(
-            f"{_GAME_META.get(g.lower(),{}).get('icon','🎮')}{c}"
-            for g, c in sorted(data["by_game"].items(),
-                               key=lambda x: x[1], reverse=True))
+        game_parts = []
+        displayed_crowns = 0
+        wordle_crowns = 0
+        
+        for g, c in sorted(data["by_game"].items(), key=lambda x: x[1], reverse=True):
+            if g.lower() in SIMPLE_CROWN_GAMES:
+                wordle_crowns += c
+                continue
+            meta = _GAME_META.get(g.lower(), {})
+            icon = meta.get('icon', '🎮')
+            game_parts.append(f"{icon} {g}: {c}")
+            displayed_crowns += c
+        
+        # Add Wordle if there are hidden crowns
+        if wordle_crowns > 0:
+            game_parts.append(f"🟩 Wordle: {wordle_crowns}")
+        
+        breakdown = " · ".join(game_parts) if game_parts else "No detailed breakdown"
         lines.append(
             f"{medal} **{data['name']}** — **{data['total']}** crowns\n"
             f"╰ {breakdown}")
 
     e.description = "\n".join(lines)
     await ctx.send(embed=e)
+
+
+@bot.command(name="resetcrowns")
+@commands.has_permissions(manage_guild=True)
+async def cmd_reset_crowns(ctx, confirm: str = "", date_str: str = ""):
+    """Reset crown counts to 0 - crowns will only count from specified date (or today) forward"""
+    if confirm.lower() != "confirm":
+        await ctx.send(
+            "⚠️ **Warning**: This will reset ALL crown counts to 0.\n"
+            "Leaderboard data will be preserved, but crowns will only count from now forward.\n"
+            "To confirm, type: `!zg resetcrowns confirm`\n"
+            "To reset to a specific date: `!zg resetcrowns confirm 3-26-2025`\n\n"
+            "*Requires 'Manage Server' permission.*"
+        )
+        return
+    
+    gid = str(ctx.guild.id)
+    
+    # Parse date if provided, otherwise use today
+    reset_date = None
+    if date_str:
+        try:
+            # Try various date formats: M-D-YYYY, M/D/YYYY, M-D-YY, etc.
+            for fmt in ["%m-%d-%Y", "%m/%d/%Y", "%m-%d-%y", "%m/%d/%y"]:
+                try:
+                    parsed = datetime.strptime(date_str, fmt)
+                    # Assume current century for 2-digit years
+                    if parsed.year < 100:
+                        parsed = parsed.replace(year=parsed.year + 2000)
+                    reset_date = parsed.date()
+                    break
+                except ValueError:
+                    continue
+            
+            if not reset_date:
+                await ctx.send(f"❌ Invalid date format: `{date_str}`. Use format like `3-26-2025` or `3/26/2025`")
+                return
+            
+            # Set to midnight ET on that date
+            reset_datetime = datetime.combine(reset_date, dt_time(0, 0, 0))
+            reset_datetime = reset_datetime.replace(tzinfo=ZoneInfo("America/New_York"))
+        except Exception as e:
+            await ctx.send(f"❌ Error parsing date: {e}")
+            return
+    else:
+        # Use today (default behavior)
+        reset_datetime = None
+    
+    # Clear ALL existing data for this guild from the store
+    old_keys = [k for k, r in store.results.items() if r["guild_id"] == gid]
+    for k in old_keys:
+        del store.results[k]
+    
+    # Set the crown reset date
+    if reset_datetime:
+        store.crown_reset_dates[gid] = reset_datetime
+        formatted_date = reset_datetime.strftime("%B %d, %Y")
+        log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} to date {reset_datetime}, cleared {len(old_keys)} old entries")
+    else:
+        reset_datetime = store.reset_crowns(gid)
+        formatted_date = reset_datetime.strftime("%B %d, %Y")
+        log.info(f"👑 Crown reset by {ctx.author.name} for guild {gid} at {reset_datetime}, cleared {len(old_keys)} old entries")
+    
+    await ctx.send(f"👑 **Crowns Reset**: Crown counts reset to 0!\n"
+                   f"Cleared {len(old_keys)} old results.\n"
+                   f"Crowns will now only count from **{formatted_date}** forward.")
+
+
+@bot.command(name="reconcile")
+@commands.has_permissions(manage_guild=True)
+async def cmd_reconcile(ctx):
+    """Manually reconcile all Wordle entries to merge duplicates"""
+    gid = str(ctx.guild.id)
+    
+    # Count current state
+    before_count = len([r for r in store.results.values() if r["guild_id"] == gid])
+    
+    # Reconcile all names in the mapping
+    reconciled = 0
+    for (g, name), user_id in list(store.name_to_id.items()):
+        if g == gid:
+            store._reconcile_wordle_entries(gid, name, user_id)
+            reconciled += 1
+    
+    # Also try to discover mappings from existing non-Wordle entries
+    discovered = 0
+    for r in store.results.values():
+        if r["guild_id"] == gid and r["game"] != "Wordle":
+            # This has a real user_id, check if we can map the username
+            username = r["username"]
+            user_id = r["user_id"]
+            if username != user_id and (gid, username) not in store.name_to_id:
+                # Found a mapping we didn't have
+                store.map_name_to_id(gid, username, user_id)
+                discovered += 1
+    
+    after_count = len([r for r in store.results.values() if r["guild_id"] == gid])
+    
+    await ctx.send(f"🔄 **Reconciliation Complete**\n"
+                   f"• Reconciled {reconciled} known name mappings\n"
+                   f"• Discovered {discovered} new name mappings\n"
+                   f"• Results: {before_count} → {after_count} entries\n\n"
+                   f"Duplicates should now be merged in crown leaderboard!")
+
+
+@bot.command(name="debug")
+@commands.has_permissions(manage_guild=True)
+async def cmd_debug(ctx):
+    """Debug command to see all users in the store"""
+    gid = str(ctx.guild.id)
+    
+    # Get all unique user_ids for this guild
+    users = {}
+    for r in store.results.values():
+        if r["guild_id"] == gid:
+            uid = r["user_id"]
+            name = r["username"]
+            if uid not in users:
+                users[uid] = {"name": name, "games": set()}
+            users[uid]["games"].add(r["game"])
+    
+    if not users:
+        return await ctx.send("No data found in store for this guild.")
+    
+    lines = ["**Users in store:**"]
+    for uid, data in sorted(users.items()):
+        games_list = ", ".join(sorted(data["games"]))
+        lines.append(f"• `{uid}` ({data['name']}) - {games_list}")
+    
+    await ctx.send("\n".join(lines[:20]))  # Limit to 20 users
+
+
+@bot.command(name="merge")
+@commands.has_permissions(manage_guild=True)
+async def cmd_merge(ctx, source: str, target: str):
+    """Manually merge two user entries (source -> target). Use Discord IDs or usernames."""
+    gid = str(ctx.guild.id)
+    
+    # Helper to extract ID from mention format <@123456789>
+    def extract_id(s):
+        if s.startswith('<@') and s.endswith('>'):
+            return s[2:-1]  # Remove <@ and >
+        if s.startswith('<@!'):
+            return s[3:-1]  # Remove <@! and > (nickname mention)
+        return s
+    
+    source_clean = extract_id(source)
+    target_clean = extract_id(target)
+    
+    # Also try with/without brackets
+    source_variants = [source_clean, f"<@{source_clean}>", f"<@!{source_clean}>"]
+    target_variants = [target_clean, f"<@{target_clean}>", f"<@!{target_clean}>"]
+    
+    # Try to find source by any variant
+    source_keys = []
+    found_source_format = None
+    
+    for variant in source_variants:
+        keys = [k for k, r in store.results.items() 
+                if r["guild_id"] == gid and r["user_id"] == variant]
+        if keys:
+            source_keys = keys
+            found_source_format = variant
+            break
+    
+    if not source_keys:
+        # Show debug info
+        users = {}
+        for r in store.results.values():
+            if r["guild_id"] == gid:
+                uid = r["user_id"]
+                name = r["username"]
+                if uid not in users:
+                    users[uid] = name
+        
+        lines = ["❌ No data found for user. **Available users:**"]
+        for uid, name in sorted(users.items())[:15]:
+            lines.append(f"• `{uid}` ({name})")
+        
+        return await ctx.send("\n".join(lines))
+    
+    # Find target
+    target_final = target_clean
+    target_name = target_clean
+    
+    for variant in target_variants:
+        for r in store.results.values():
+            if r["guild_id"] == gid and r["user_id"] == variant:
+                target_final = variant
+                target_name = r["username"]
+                break
+        if target_final != target_clean:
+            break
+    
+    # Merge
+    merged = 0
+    for key in source_keys:
+        r = store.results[key]
+        new_key = (gid, target_final, r["game"], r["puzzle_date"])
+        
+        if new_key in store.results:
+            existing = store.results[new_key]
+            meta = _GAME_META.get(r["game"].lower(), {})
+            low = meta.get("low", False)
+            
+            if low:
+                if r["score"] < existing["score"]:
+                    store.results[new_key] = {**r, "user_id": target_final, "username": target_name}
+            else:
+                if r["score"] > existing["score"]:
+                    store.results[new_key] = {**r, "user_id": target_final, "username": target_name}
+        else:
+            store.results[new_key] = {**r, "user_id": target_final, "username": target_name}
+        
+        del store.results[key]
+        merged += 1
+    
+    # Create all mappings
+    for variant in source_variants:
+        store.name_to_id[(gid, variant)] = target_final
+    
+    await ctx.send(f"✅ **Merged {merged} entries**\n"
+                   f"• Source format: `{found_source_format}`\n"
+                   f"• Target: `{target_final}` ({target_name})\n\n"
+                   f"Run `!zg crowns` to see updated leaderboard!")
 
 
 @bot.command(name="setchannel")
@@ -818,17 +1344,24 @@ async def cmd_help(ctx):
         f"`{PREFIX}lb` — today\n"
         f"`{PREFIX}lb yesterday`\n"
         f"`{PREFIX}lb week` / `month` / `all`\n"
-        f"`{PREFIX}lb wordle` — one game, today\n"
-        f"`{PREFIX}lb week wordle` — one game, weekly detail"))
+        f"`{PREFIX}lb wordle` — one game, today"))
     e.add_field(name="👑  Crowns & Stats", inline=False, value=(
-        f"`{PREFIX}crowns` — crown leaderboard\n"
+        f"`{PREFIX}crowns` — crown leaderboard (default: month)\n"
         f"`{PREFIX}crowns week` / `{PREFIX}crowns wordle`\n"
-        f"`{PREFIX}mystats` / `{PREFIX}stats @user`"))
-    e.add_field(name="⚙️  Setup", inline=False, value=(
-        f"`{PREFIX}games` — list supported games\n"
+        f"`{PREFIX}mystats` / `{PREFIX}stats @user`\n"
+        f"`{PREFIX}resetcrowns confirm` — 👑 reset crown counts (admin only)\n"
+        f"`{PREFIX}resetcrowns confirm 3-26-2025` — reset to specific date"))
+    e.add_field(name="⚙️  Admin Commands", inline=False, value=(
         f"`{PREFIX}setchannel #channel` — auto daily leaderboard at 11 PM ET\n"
-        f"`{PREFIX}setchannel` — disable auto-post\n\n"
+        f"`{PREFIX}setchannel` — disable auto-post\n"
+        f"`{PREFIX}resetcrowns confirm` — reset crown competition\n"
+        f"`{PREFIX}reconcile` — auto-merge duplicate entries\n"
+        f"`{PREFIX}merge @user1 user2_id` — manually merge duplicates\n\n"
         f"🗑️  **Auto-reset**: Leaderboards reset monthly on day {RESET_DAY}"))
+    e.add_field(name="📚  Other Commands", inline=False, value=(
+        f"`{PREFIX}games` — list supported games\n"
+        f"`{PREFIX}links` — show all game links\n"
+        f"`{PREFIX}sync` — manually sync message history"))
     e.set_footer(text="Add new games → edit GAME PARSERS in bot.py")
     await ctx.send(embed=e)
 
@@ -853,8 +1386,7 @@ async def daily_summary():
         ch = bot.get_channel(channel_id)
         if not ch:
             continue
-            
-        # Fetch from in-memory store
+        
         rows = store.fetch(gid, date=ds)
         if not rows:
             continue
@@ -874,7 +1406,6 @@ async def monthly_reset_check():
     """Check and perform monthly reset"""
     if store.check_reset():
         log.info("🗑️  Scheduled monthly reset completed")
-        # Optionally announce reset in configured channels
         for guild in bot.guilds:
             gid = str(guild.id)
             channel_id = config_store.get(gid)
@@ -887,12 +1418,62 @@ async def monthly_reset_check():
                         pass
 
 
+@tasks.loop(time=dt_time(hour=8, minute=0, tzinfo=ZoneInfo("America/New_York")))
+async def daily_links():
+    """Post daily game links at 8AM ET"""
+    today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    
+    for guild in bot.guilds:
+        gid = str(guild.id)
+        
+        channel_id = config_store.get(gid)
+        
+        if not channel_id:
+            continue
+            
+        ch = bot.get_channel(channel_id)
+        if not ch:
+            continue
+        
+        lines = []
+        for game_name, url in sorted(GAME_LINKS.items()):
+            meta = _GAME_META.get(game_name.lower(), {})
+            icon = meta.get('icon', '🎮')
+            lines.append(f"{icon} [{game_name}]({url})")
+        
+        embed = discord.Embed(
+            title="🎮  Daily Games Links",
+            description="\n".join(lines),
+            color=0x57F287,
+            timestamp=datetime.now(timezone.utc)
+        )
+        today = datetime.now(ZoneInfo("America/New_York"))
+        embed.set_footer(text=f"{today.strftime('%A, %B %d')} · Good luck!")
+        
+        sent_msg = await ch.send(embed=embed)
+        log.info("Links sent → %s", guild.name)
+        
+        # Check for and delete duplicate links posted today (from other instances)
+        try:
+            async for msg in ch.history(limit=20):
+                if (msg.id != sent_msg.id and  # Don't delete the one we just posted
+                    msg.author.id == bot.user.id and 
+                    msg.embeds and 
+                    msg.embeds[0].title == "🎮  Daily Games Links"):
+                    msg_date = msg.created_at.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+                    if msg_date == today_str:
+                        log.info(f"Deleting duplicate links message from today in {guild.name}")
+                        await msg.delete()
+                        break  # Only delete one duplicate
+        except Exception as e:
+            log.error(f"Error cleaning up duplicates: {e}")
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  START
 # ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     if not TOKEN:
-        raise SystemExit(
-            "Set DAILY_GAMES_BOT_TOKEN  (env var or .env file)")
+        raise SystemExit("Set DAILY_GAMES_BOT_TOKEN (env var or .env file)")
     bot.run(TOKEN)
