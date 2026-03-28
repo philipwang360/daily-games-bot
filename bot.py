@@ -549,8 +549,10 @@ def _build_daily_embed(title, rows):
 
         lines = []
         for _rank, medal, r in ranked:
-            crown = " 👑" if (r["score"] == best_score and len(gr) > 1 and not all_failed) else ""
-            lines.append(f"{medal} **{r['username']}** — {r['display']}{crown}")
+            is_crown = r["score"] == best_score and len(gr) > 1 and not all_failed
+            crown = " 👑" if is_crown else ""
+            indent = "" if is_crown else "╰ "
+            lines.append(f"{indent}{medal} **{r['username']}** — {r['display']}{crown}")
 
         field_name = f"{icon}  {game_name}"
         if low:
