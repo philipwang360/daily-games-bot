@@ -300,10 +300,11 @@ def parse_wordle_group_summary(text: str, msg_created_at=None) -> list[tuple]:
     return results
 
 
-@game_parser("Pokédle", r"#Pokédle[\s\S]*?in\s+(\d+)\s+shots?",
+@game_parser("Pokédle", r"#Pokédle[\s\S]*?in\s+(one|\d+)\s+shots?",
              lower_is_better=True, icon="⚔️")
 def _pokedle(m):
-    s = int(m.group(1))
+    raw = m.group(1)
+    s = 1 if raw == "one" else int(raw)
     return s, 8, f"{s} shots"
 
 
@@ -315,10 +316,11 @@ def _loldle(m):
     return s, 8, f"{s} shots"
 
 
-@game_parser("Narutodle", r"#Narutodle[\s\S]*?in\s+(\d+)\s+shots?",
+@game_parser("Narutodle", r"#Narutodle[\s\S]*?in\s+(one|\d+)\s+shots?",
              lower_is_better=True, icon="🍥")
 def _narutodle(m):
-    s = int(m.group(1))
+    raw = m.group(1)
+    s = 1 if raw == "one" else int(raw)
     return s, 8, f"{s} shots"
 
 
