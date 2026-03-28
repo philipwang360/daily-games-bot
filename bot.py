@@ -432,7 +432,7 @@ GAME_LINKS = {
     "Dialed": "https://dialed.gg/",
     "Catfishing": "https://catfishing.net/",
     "Feudle": "https://feudlegame.com/",
-    "Doctordle": "https://doctordle.com/",
+    "Doctordle": "https://doctordle.org/",
     "TimeGuessr": "https://timeguessr.com/",
     "Framed": "https://framed.wtf/",
     "Costcodle": "https://costcodle.com/",
