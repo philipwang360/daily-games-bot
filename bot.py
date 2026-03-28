@@ -307,10 +307,11 @@ def _pokedle(m):
     return s, 8, f"{s} shots"
 
 
-@game_parser("LoLdle", r"#LoLdle[\s\S]*?in\s+(\d+)\s+shots?",
+@game_parser("LoLdle", r"#LoLdle[\s\S]*?in\s+(one|\d+)\s+shots?",
              lower_is_better=True, icon="🎮")
 def _loldle(m):
-    s = int(m.group(1))
+    raw = m.group(1)
+    s = 1 if raw == "one" else int(raw)
     return s, 8, f"{s} shots"
 
 
@@ -432,7 +433,7 @@ GAME_LINKS = {
     "Dialed": "https://dialed.gg/",
     "Catfishing": "https://catfishing.net/",
     "Feudle": "https://feudlegame.com/",
-    "Doctordle": "https://doctordle.org/",
+    "Doctordle": "https://doctordle.com/",
     "TimeGuessr": "https://timeguessr.com/",
     "Framed": "https://framed.wtf/",
     "Costcodle": "https://costcodle.com/",
