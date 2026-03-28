@@ -535,7 +535,7 @@ def _build_daily_embed(title, rows):
         embed.description = "No results yet — paste a game share to get started!"
         return embed
 
-    for game_name in sorted(by_game):
+    for i, game_name in enumerate(sorted(by_game)):
         gr   = by_game[game_name]
         meta = _GAME_META.get(game_name.lower(), {})
         low  = meta.get("low", False)
@@ -554,10 +554,9 @@ def _build_daily_embed(title, rows):
             indent = "╰ " if not is_crown and len(gr) > 1 else ""
             lines.append(f"{indent}{medal} **{r['username']}** — {r['display']}{crown}")
 
-        field_name = game_name
-            
-        embed.add_field(name=field_name,
-                        value="\n".join(lines), inline=False)
+        embed.add_field(name=game_name, value="\n".join(lines), inline=True)
+        if i % 2 == 1:
+            embed.add_field(name="\u200b", value="\u200b", inline=True)
     return embed
 
 
