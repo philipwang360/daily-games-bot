@@ -524,40 +524,88 @@ def _fmt_avg(avg, max_score):
 #  EMBED BUILDERS
 # ═══════════════════════════════════════════════════════════════════
 
-def _build_daily_embed(title, rows):
+GAMES_PER_PAGE = 4
+
+
+def _build_game_fields(rows) -> list[tuple[str, str]]:
     by_game: dict[str, list] = defaultdict(list)
     for r in rows:
         by_game[r["game"]].append(r)
 
-    embed = discord.Embed(title=title, color=0x5865F2,
-                          timestamp=datetime.now(timezone.utc))
-    if not by_game:
-        embed.description = "No results yet — paste a game share to get started!"
-        return embed
-
-    for i, game_name in enumerate(sorted(by_game, key=lambda g: len(by_game[g]), reverse=True)):
+    fields = []
+    for game_name in sorted(by_game, key=lambda g: len(by_game[g]), reverse=True):
         gr   = by_game[game_name]
         meta = _GAME_META.get(game_name.lower(), {})
         low  = meta.get("low", False)
-        icon = meta.get("icon", "🎮")
 
-        ranked = _rank_items(gr, key=lambda r: r["score"],
-                             reverse=(not low))
-        best_score = ranked[0][2]["score"] if ranked else None
+        ranked = _rank_items(gr, key=lambda r: r["score"], reverse=(not low))
+        best_score     = ranked[0][2]["score"]     if ranked else None
         best_max_score = ranked[0][2]["max_score"] if ranked else None
         all_failed = best_score > best_max_score if best_score and best_max_score else False
 
         lines = []
         for _rank, medal, r in ranked:
             is_crown = r["score"] == best_score and len(gr) > 1 and not all_failed
-            crown = " 👑" if is_crown else ""
+            crown  = " 👑" if is_crown else ""
             indent = "╰ " if not is_crown and len(gr) > 1 else ""
             lines.append(f"{indent}{medal} **{r['username']}** — {r['display']}{crown}")
 
-        embed.add_field(name=game_name, value="\n".join(lines), inline=True)
-        if i % 2 == 1:
-            embed.add_field(name="\u200b", value="\u200b", inline=True)
+        fields.append((game_name, "\n".join(lines)))
+    return fields
+
+
+def _build_page_embed(title: str, fields: list[tuple[str, str]],
+                      page: int, total_pages: int) -> discord.Embed:
+    embed = discord.Embed(title=title, color=0x5865F2,
+                          timestamp=datetime.now(timezone.utc))
+    start = page * GAMES_PER_PAGE
+    for name, value in fields[start:start + GAMES_PER_PAGE]:
+        embed.add_field(name=name, value=value, inline=False)
+    if total_pages > 1:
+        embed.set_footer(text=f"Page {page + 1}/{total_pages}")
     return embed
+
+
+class DailyLeaderboardView(discord.ui.View):
+    def __init__(self, title: str, fields: list[tuple[str, str]]):
+        super().__init__(timeout=300)
+        self.title       = title
+        self.fields      = fields
+        self.page        = 0
+        self.total_pages = max(1, (len(fields) + GAMES_PER_PAGE - 1) // GAMES_PER_PAGE)
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page >= self.total_pages - 1
+
+    def current_embed(self) -> discord.Embed:
+        return _build_page_embed(self.title, self.fields, self.page, self.total_pages)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+
+def _build_daily_embed(title, rows):
+    fields = _build_game_fields(rows)
+    if not fields:
+        embed = discord.Embed(title=title, color=0x5865F2,
+                              timestamp=datetime.now(timezone.utc))
+        embed.description = "No results yet — paste a game share to get started!"
+        return embed, None
+    total_pages = max(1, (len(fields) + GAMES_PER_PAGE - 1) // GAMES_PER_PAGE)
+    embed = _build_page_embed(title, fields, 0, total_pages)
+    view  = DailyLeaderboardView(title, fields) if total_pages > 1 else None
+    return embed, view
 
 
 def _build_period_embed(title, rows, *, show_detail=False, guild_id: str = ""):
@@ -921,16 +969,15 @@ async def cmd_lb(ctx, *, args: str = "today"):
     rows = store.fetch(gid, **kw)
 
     if single_day:
-        embed = _build_daily_embed(title, rows)
+        embed, view = _build_daily_embed(title, rows)
+        if single_day and not game_name:
+            all_rows = store.get_all(gid)
+            _add_streaks(embed, all_rows)
+        await ctx.send(embed=embed, view=view)
     else:
         show_detail = bool(game_name) and period == "week"
         embed = _build_period_embed(title, rows, show_detail=show_detail)
-
-    if single_day and not game_name:
-        all_rows = store.get_all(gid)
-        _add_streaks(embed, all_rows)
-
-    await ctx.send(embed=embed)
+        await ctx.send(embed=embed)
 
 
 @bot.command(name="games")
@@ -1391,13 +1438,13 @@ async def daily_summary():
         if not rows:
             continue
             
-        embed = _build_daily_embed(
+        embed, view = _build_daily_embed(
             f"📊  Daily Leaderboard — {today.strftime('%b %d')}", rows)
-        
+
         all_rows = store.get_all(gid)
         _add_streaks(embed, all_rows)
-        
-        await ch.send(embed=embed)
+
+        await ch.send(embed=embed, view=view)
         log.info("Recap sent → %s", guild.name)
 
 
