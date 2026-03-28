@@ -535,7 +535,7 @@ def _build_daily_embed(title, rows):
         embed.description = "No results yet — paste a game share to get started!"
         return embed
 
-    for i, game_name in enumerate(sorted(by_game)):
+    for i, game_name in enumerate(sorted(by_game, key=lambda g: len(by_game[g]), reverse=True)):
         gr   = by_game[game_name]
         meta = _GAME_META.get(game_name.lower(), {})
         low  = meta.get("low", False)
