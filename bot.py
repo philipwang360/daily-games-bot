@@ -551,14 +551,10 @@ def _build_daily_embed(title, rows):
         for _rank, medal, r in ranked:
             is_crown = r["score"] == best_score and len(gr) > 1 and not all_failed
             crown = " 👑" if is_crown else ""
-            indent = "" if is_crown else "╰ "
+            indent = "╰ " if not is_crown and len(gr) > 1 else ""
             lines.append(f"{indent}{medal} **{r['username']}** — {r['display']}{crown}")
 
-        field_name = f"{icon}  {game_name}"
-        if low:
-            field_name += " (lower is better)"
-        else:
-            field_name += " (higher is better)"
+        field_name = game_name
             
         embed.add_field(name=field_name,
                         value="\n".join(lines), inline=False)
