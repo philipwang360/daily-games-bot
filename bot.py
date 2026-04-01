@@ -365,7 +365,7 @@ def _doctordle(m):
     return g, total, f"{g}/{total} solved"
 
 
-@game_parser("TimeGuessr", r"TimeGuessr\s*#\d+\s*([\d,]+)/([\d,]+)",
+@game_parser("TimeGuessr", r"TimeGuessr\s*#\d+[\s\S]*?([\d,]+)/([\d,]+)",
              icon="⏱️")
 def _timeguessr(m):
     s  = int(m.group(1).replace(",", ""))
@@ -435,7 +435,7 @@ GAME_LINKS = {
     "Dialed": "https://dialed.gg/",
     "Catfishing": "https://catfishing.net/",
     "Feudle": "https://feudlegame.com/",
-    "Doctordle": "https://doctordle.com/",
+    "Doctordle": "https://doctordle.org/",
     "TimeGuessr": "https://timeguessr.com/",
     "Framed": "https://framed.wtf/",
     "Costcodle": "https://costcodle.com/",
