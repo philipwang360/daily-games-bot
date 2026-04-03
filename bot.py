@@ -1372,6 +1372,14 @@ async def cmd_merge(ctx, source: str, target: str):
                    f"Run `!zg crowns` to see updated leaderboard!")
 
 
+@bot.command(name="forcesync")
+@commands.has_permissions(manage_guild=True)
+async def cmd_forcesync(ctx):
+    """Force sync slash commands to this server instantly"""
+    synced = await bot.tree.sync(guild=ctx.guild)
+    await ctx.send(f"✅ Synced {len(synced)} slash commands to this server!")
+
+
 @bot.hybrid_command(name="setchannel")
 @commands.has_permissions(manage_guild=True)
 @app_commands.describe(channel="Channel for daily recaps (leave blank to disable)")
