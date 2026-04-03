@@ -895,7 +895,7 @@ async def game_autocomplete(interaction: discord.Interaction, current: str):
     ][:25]
 
 
-@commands.hybrid_command(name="synclb")
+@bot.hybrid_command(name="synclb")
 @app_commands.describe(days="Number of days of history to sync (default 30)")
 async def cmd_sync(ctx, days: int = 30):
     """Manually sync message history"""
@@ -904,7 +904,7 @@ async def cmd_sync(ctx, days: int = 30):
     await ctx.send(f"✅ Found {count} game results!")
 
 
-@commands.hybrid_command(name="links")
+@bot.hybrid_command(name="links")
 async def cmd_links(ctx):
     """Show all game links with crown info"""
     crown_games = []
@@ -935,7 +935,7 @@ async def cmd_links(ctx):
     await ctx.send(embed=embed)
 
 
-@commands.hybrid_command(name="lb", aliases=["leaderboard"])
+@bot.hybrid_command(name="lb", aliases=["leaderboard"])
 @app_commands.describe(period="Time period to show", game="Filter by a specific game")
 @app_commands.autocomplete(game=game_autocomplete)
 async def cmd_lb(ctx, period: PeriodChoice = "today", game: Optional[str] = None):
@@ -990,7 +990,7 @@ async def cmd_lb(ctx, period: PeriodChoice = "today", game: Optional[str] = None
         await ctx.send(embed=embed)
 
 
-@commands.hybrid_command(name="games")
+@bot.hybrid_command(name="games")
 async def cmd_games(ctx):
     lines = []
     for p in sorted(_PARSERS, key=lambda p: p["name"]):
@@ -1002,7 +1002,7 @@ async def cmd_games(ctx):
     await ctx.send(embed=e)
 
 
-@commands.hybrid_command(name="mystats", aliases=["stats"])
+@bot.hybrid_command(name="mystats", aliases=["stats"])
 @app_commands.describe(member="User to show stats for (default: yourself)")
 async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     target = member or ctx.author
@@ -1059,7 +1059,7 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     await ctx.send(embed=e)
 
 
-@commands.hybrid_command(name="crowns")
+@bot.hybrid_command(name="crowns")
 @app_commands.describe(period="Time period to show", game="Filter by a specific game")
 @app_commands.autocomplete(game=game_autocomplete)
 async def cmd_crowns(ctx, period: PeriodChoice = "month", game: Optional[str] = None):
@@ -1145,7 +1145,7 @@ async def cmd_crowns(ctx, period: PeriodChoice = "month", game: Optional[str] = 
     await ctx.send(embed=e)
 
 
-@commands.hybrid_command(name="resetcrowns")
+@bot.hybrid_command(name="resetcrowns")
 @commands.has_permissions(manage_guild=True)
 @app_commands.describe(confirm="Type 'confirm' to proceed", date_str="Optional start date (e.g. 3-26-2025)")
 async def cmd_reset_crowns(ctx, confirm: str = "", date_str: str = ""):
@@ -1212,7 +1212,7 @@ async def cmd_reset_crowns(ctx, confirm: str = "", date_str: str = ""):
                    f"Crowns will now only count from **{formatted_date}** forward.")
 
 
-@commands.hybrid_command(name="reconcile")
+@bot.hybrid_command(name="reconcile")
 @commands.has_permissions(manage_guild=True)
 async def cmd_reconcile(ctx):
     """Manually reconcile all Wordle entries to merge duplicates"""
@@ -1249,7 +1249,7 @@ async def cmd_reconcile(ctx):
                    f"Duplicates should now be merged in crown leaderboard!")
 
 
-@commands.hybrid_command(name="debug")
+@bot.hybrid_command(name="debug")
 @commands.has_permissions(manage_guild=True)
 async def cmd_debug(ctx):
     """Debug command to see all users in the store"""
@@ -1276,7 +1276,7 @@ async def cmd_debug(ctx):
     await ctx.send("\n".join(lines[:20]))  # Limit to 20 users
 
 
-@commands.hybrid_command(name="merge")
+@bot.hybrid_command(name="merge")
 @commands.has_permissions(manage_guild=True)
 @app_commands.describe(source="User ID or mention to merge from", target="User ID or mention to merge into")
 async def cmd_merge(ctx, source: str, target: str):
@@ -1372,7 +1372,7 @@ async def cmd_merge(ctx, source: str, target: str):
                    f"Run `!zg crowns` to see updated leaderboard!")
 
 
-@commands.hybrid_command(name="setchannel")
+@bot.hybrid_command(name="setchannel")
 @commands.has_permissions(manage_guild=True)
 @app_commands.describe(channel="Channel for daily recaps (leave blank to disable)")
 async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
@@ -1385,7 +1385,7 @@ async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
         await ctx.send("✅  Daily recaps disabled.")
 
 
-@commands.hybrid_command(name="help")
+@bot.hybrid_command(name="help")
 async def cmd_help(ctx):
     e = discord.Embed(
         title="🎲  Zaily Games Leaderboard",
