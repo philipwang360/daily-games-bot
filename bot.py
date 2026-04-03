@@ -7,10 +7,11 @@ Monthly reset to prevent backlog accumulation
 import re, os, logging, asyncio, unicodedata
 from datetime import datetime, timedelta, timezone, time as dt_time
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, Literal
 from zoneinfo import ZoneInfo
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 try:
@@ -803,8 +804,14 @@ async def on_ready():
     if not daily_links.is_running():
         daily_links.start()
     
+    try:
+        synced = await bot.tree.sync()
+        log.info("🔄  Synced %d slash commands", len(synced))
+    except Exception as e:
+        log.warning("Slash command sync failed: %s", e)
+
     cmds = [c.name for c in bot.commands]
-    log.info("✅  %s online  ·  tracking %d games  ·  prefix: '%s'  ·  commands: %s", 
+    log.info("✅  %s online  ·  tracking %d games  ·  prefix: '%s'  ·  commands: %s",
              bot.user, len(_PARSERS), PREFIX, cmds)
 
 
@@ -877,8 +884,19 @@ async def on_message(msg: discord.Message):
 
 PERIODS = {"today", "yesterday", "yday", "week", "month", "all"}
 
+PeriodChoice = Literal["today", "yesterday", "week", "month", "all"]
 
-@bot.command(name="sync")
+
+async def game_autocomplete(interaction: discord.Interaction, current: str):
+    return [
+        app_commands.Choice(name=p["name"], value=p["name"])
+        for p in _PARSERS
+        if current.lower() in p["name"].lower()
+    ][:25]
+
+
+@commands.hybrid_command(name="synclb")
+@app_commands.describe(days="Number of days of history to sync (default 30)")
 async def cmd_sync(ctx, days: int = 30):
     """Manually sync message history"""
     await ctx.send(f"🔄 Syncing last {days} days...")
@@ -886,7 +904,7 @@ async def cmd_sync(ctx, days: int = 30):
     await ctx.send(f"✅ Found {count} game results!")
 
 
-@bot.command(name="links")
+@commands.hybrid_command(name="links")
 async def cmd_links(ctx):
     """Show all game links with crown info"""
     crown_games = []
@@ -917,22 +935,14 @@ async def cmd_links(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="lb", aliases=["leaderboard"])
-async def cmd_lb(ctx, *, args: str = "today"):
+@commands.hybrid_command(name="lb", aliases=["leaderboard"])
+@app_commands.describe(period="Time period to show", game="Filter by a specific game")
+@app_commands.autocomplete(game=game_autocomplete)
+async def cmd_lb(ctx, period: PeriodChoice = "today", game: Optional[str] = None):
     gid   = str(ctx.guild.id)
     today = datetime.now(ZoneInfo("America/New_York")).date()
 
-    parts = args.split(maxsplit=1)
-    first = parts[0].lower()
-
-    if first in PERIODS:
-        period     = first
-        game_query = parts[1].strip() if len(parts) > 1 else None
-    else:
-        period     = "today"
-        game_query = args.strip()
-
-    game_name = _match_game(game_query) if game_query else None
+    game_name = _match_game(game) if game else None
 
     kw: dict     = {}
     single_day   = False
@@ -980,7 +990,7 @@ async def cmd_lb(ctx, *, args: str = "today"):
         await ctx.send(embed=embed)
 
 
-@bot.command(name="games")
+@commands.hybrid_command(name="games")
 async def cmd_games(ctx):
     lines = []
     for p in sorted(_PARSERS, key=lambda p: p["name"]):
@@ -992,7 +1002,8 @@ async def cmd_games(ctx):
     await ctx.send(embed=e)
 
 
-@bot.command(name="mystats", aliases=["stats"])
+@commands.hybrid_command(name="mystats", aliases=["stats"])
+@app_commands.describe(member="User to show stats for (default: yourself)")
 async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     target = member or ctx.author
     gid    = str(ctx.guild.id)
@@ -1048,22 +1059,14 @@ async def cmd_stats(ctx, member: Optional[discord.Member] = None):
     await ctx.send(embed=e)
 
 
-@bot.command(name="crowns")
-async def cmd_crowns(ctx, *, args: str = "month"):
+@commands.hybrid_command(name="crowns")
+@app_commands.describe(period="Time period to show", game="Filter by a specific game")
+@app_commands.autocomplete(game=game_autocomplete)
+async def cmd_crowns(ctx, period: PeriodChoice = "month", game: Optional[str] = None):
     gid   = str(ctx.guild.id)
     today = datetime.now(ZoneInfo("America/New_York")).date()
 
-    parts = args.split(maxsplit=1)
-    first = parts[0].lower()
-
-    if first in PERIODS:
-        period     = first
-        game_query = parts[1].strip() if len(parts) > 1 else None
-    else:
-        period     = "month"
-        game_query = args.strip() if args.strip() not in PERIODS else None
-
-    game_name = _match_game(game_query) if game_query else None
+    game_name = _match_game(game) if game else None
 
     kw: dict = {}
     if period == "today":
@@ -1142,8 +1145,9 @@ async def cmd_crowns(ctx, *, args: str = "month"):
     await ctx.send(embed=e)
 
 
-@bot.command(name="resetcrowns")
+@commands.hybrid_command(name="resetcrowns")
 @commands.has_permissions(manage_guild=True)
+@app_commands.describe(confirm="Type 'confirm' to proceed", date_str="Optional start date (e.g. 3-26-2025)")
 async def cmd_reset_crowns(ctx, confirm: str = "", date_str: str = ""):
     """Reset crown counts to 0 - crowns will only count from specified date (or today) forward"""
     if confirm.lower() != "confirm":
@@ -1208,7 +1212,7 @@ async def cmd_reset_crowns(ctx, confirm: str = "", date_str: str = ""):
                    f"Crowns will now only count from **{formatted_date}** forward.")
 
 
-@bot.command(name="reconcile")
+@commands.hybrid_command(name="reconcile")
 @commands.has_permissions(manage_guild=True)
 async def cmd_reconcile(ctx):
     """Manually reconcile all Wordle entries to merge duplicates"""
@@ -1245,7 +1249,7 @@ async def cmd_reconcile(ctx):
                    f"Duplicates should now be merged in crown leaderboard!")
 
 
-@bot.command(name="debug")
+@commands.hybrid_command(name="debug")
 @commands.has_permissions(manage_guild=True)
 async def cmd_debug(ctx):
     """Debug command to see all users in the store"""
@@ -1272,8 +1276,9 @@ async def cmd_debug(ctx):
     await ctx.send("\n".join(lines[:20]))  # Limit to 20 users
 
 
-@bot.command(name="merge")
+@commands.hybrid_command(name="merge")
 @commands.has_permissions(manage_guild=True)
+@app_commands.describe(source="User ID or mention to merge from", target="User ID or mention to merge into")
 async def cmd_merge(ctx, source: str, target: str):
     """Manually merge two user entries (source -> target). Use Discord IDs or usernames."""
     gid = str(ctx.guild.id)
@@ -1367,8 +1372,9 @@ async def cmd_merge(ctx, source: str, target: str):
                    f"Run `!zg crowns` to see updated leaderboard!")
 
 
-@bot.command(name="setchannel")
+@commands.hybrid_command(name="setchannel")
 @commands.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Channel for daily recaps (leave blank to disable)")
 async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
     gid = str(ctx.guild.id)
     config_store[gid] = channel.id if channel else None
@@ -1379,7 +1385,7 @@ async def cmd_setchannel(ctx, channel: Optional[discord.TextChannel] = None):
         await ctx.send("✅  Daily recaps disabled.")
 
 
-@bot.command(name="help")
+@commands.hybrid_command(name="help")
 async def cmd_help(ctx):
     e = discord.Embed(
         title="🎲  Zaily Games Leaderboard",
