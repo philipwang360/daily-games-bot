@@ -346,7 +346,7 @@ def _catfishing(m):
     return s, mx, f"{s}/{mx}"
 
 
-@game_parser("Feudle", r"Feudle[\s\S]*?Score:\s*(\d+)/(\d+)",
+@game_parser("Feudle", r"Feudle[\s\S]*?\n(?:Score:\s*)?(\d+)/(\d+)",
              icon="📖")
 def _feudle(m):
     s, mx = int(m.group(1)), int(m.group(2))
